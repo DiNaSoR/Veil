@@ -312,3 +312,6 @@ Notepad.cs
 VSystem.cs
 Bridges.cs
 Integration/
+
+# Cursor Memory System - generated/local files
+.cursor/memory/memory.sqlite
