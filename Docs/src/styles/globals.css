@@ -1,0 +1,464 @@
+/*
+ * BloodCraftPlus Docs – Global Styles
+ */
+
+/* ═══════════════════════════════════════════════════════════════
+   RESET & BASE
+   ═══════════════════════════════════════════════════════════════ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--fg0);
+  background: var(--bg0);
+  min-height: 100vh;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg1);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg3);
+  border-radius: var(--radius-sm);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TYPOGRAPHY
+   ═══════════════════════════════════════════════════════════════ */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  color: var(--fg0);
+  margin-top: var(--space-8);
+  margin-bottom: var(--space-4);
+}
+
+h1 {
+  font-size: var(--text-4xl);
+  color: var(--accent);
+  margin-top: 0;
+  border-bottom: 2px solid var(--accent-muted);
+  padding-bottom: var(--space-4);
+}
+
+h2 {
+  font-size: var(--text-2xl);
+  margin-top: var(--space-10);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-color);
+}
+
+h3 {
+  font-size: var(--text-xl);
+}
+
+h4 {
+  font-size: var(--text-lg);
+}
+
+p {
+  margin-bottom: var(--space-4);
+  color: var(--fg1);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+strong {
+  font-weight: 600;
+  color: var(--fg0);
+}
+
+em {
+  font-style: italic;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LISTS
+   ═══════════════════════════════════════════════════════════════ */
+
+ul,
+ol {
+  margin-bottom: var(--space-4);
+  padding-left: var(--space-6);
+  color: var(--fg1);
+}
+
+li {
+  margin-bottom: var(--space-2);
+}
+
+li::marker {
+  color: var(--accent);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CODE
+   ═══════════════════════════════════════════════════════════════ */
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg2);
+  color: var(--pink);
+  padding: 0.15em 0.4em;
+  border-radius: var(--radius-sm);
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--bg1);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+  overflow-x: auto;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TABLES
+   ═══════════════════════════════════════════════════════════════ */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-6);
+  font-size: var(--text-sm);
+}
+
+th,
+td {
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+th {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--fg0);
+  background: var(--bg2);
+}
+
+tr:hover td {
+  background: var(--bg2);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   BLOCKQUOTES
+   ═══════════════════════════════════════════════════════════════ */
+
+blockquote {
+  border-left: 4px solid var(--accent);
+  background: var(--accent-muted);
+  padding: var(--space-4) var(--space-6);
+  margin: var(--space-4) 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  color: var(--fg1);
+}
+
+blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HORIZONTAL RULE
+   ═══════════════════════════════════════════════════════════════ */
+
+hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  margin: var(--space-8) 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SELECTION
+   ═══════════════════════════════════════════════════════════════ */
+
+::selection {
+  background: var(--accent);
+  color: var(--fg0);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   IMAGES
+   ═══════════════════════════════════════════════════════════════ */
+
+img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DOC LAYOUT HELPERS
+   ═══════════════════════════════════════════════════════════════ */
+
+.tab-split {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-8);
+  margin: var(--space-4) 0 var(--space-8);
+}
+
+.tab-split-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tab-split-media {
+  flex: 0 0 auto;
+  width: min(380px, 100%);
+}
+
+@media (max-width: 900px) {
+  .tab-split {
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .tab-split-media {
+    width: 100%;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   UTILITY CLASSES
+   ═══════════════════════════════════════════════════════════════ */
+
+.text-accent {
+  color: var(--accent);
+}
+
+.text-muted {
+  color: var(--fg2);
+}
+
+.text-center {
+  text-align: center;
+}
+
+.mt-4 {
+  margin-top: var(--space-4);
+}
+
+.mt-8 {
+  margin-top: var(--space-8);
+}
+
+.mb-4 {
+  margin-bottom: var(--space-4);
+}
+
+.mb-8 {
+  margin-bottom: var(--space-8);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CHANGELOG "CODEBOX" MODE (full-width, monospace panel)
+   ═══════════════════════════════════════════════════════════════ */
+
+.changelog-codebox {
+  --changelog-codebox-pad: var(--space-6);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+  background: var(--bg1);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--changelog-codebox-pad);
+}
+
+.changelog-codebox .changelog-plugin-header {
+  display: block;
+  margin: var(--space-6) calc(var(--changelog-codebox-pad) * -1) var(--space-4);
+  padding: var(--space-3) var(--changelog-codebox-pad);
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-left: 4px solid transparent;
+  color: var(--fg0);
+}
+
+.changelog-codebox .changelog-plugin-header:first-child {
+  margin-top: calc(var(--changelog-codebox-pad) * -1);
+  border-top: 0;
+}
+
+.changelog-codebox .changelog-plugin-header--eclipse {
+  background: rgba(139, 233, 253, 0.10);
+  border-left-color: var(--cyan);
+}
+
+.changelog-codebox .changelog-plugin-header--Veil {
+  background: rgba(80, 250, 123, 0.10);
+  border-left-color: var(--green);
+}
+
+.changelog-codebox .changelog-plugin-header--bloodcraft {
+  background: var(--accent-muted);
+  border-left-color: var(--accent);
+}
+
+.changelog-codebox .changelog-plugin-header--vdebug {
+  background: var(--accent2-muted);
+  border-left-color: var(--accent2);
+}
+
+.changelog-codebox .changelog-entry-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  margin-bottom: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.changelog-codebox .changelog-entry-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg2);
+  color: var(--fg0);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+}
+
+.changelog-codebox .changelog-entry-title {
+  color: var(--fg1);
+  font-weight: 600;
+  display: inline-block;
+  position: relative;
+  padding-bottom: 3px;
+  letter-spacing: 0.01em;
+}
+
+.changelog-codebox .changelog-entry-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg,
+      var(--changelog-entry-accent, rgba(255, 255, 255, 0.22)),
+      transparent);
+  opacity: 0.9;
+}
+
+.changelog-codebox .changelog-entry-header--eclipse .changelog-entry-version {
+  border-color: rgba(139, 233, 253, 0.35);
+  background: rgba(139, 233, 253, 0.10);
+  color: var(--cyan);
+}
+
+.changelog-codebox .changelog-entry-header--eclipse {
+  --changelog-entry-accent: rgba(139, 233, 253, 0.75);
+}
+
+.changelog-codebox .changelog-entry-header--bloodcraft .changelog-entry-version {
+  border-color: rgba(196, 30, 58, 0.35);
+  background: rgba(196, 30, 58, 0.12);
+  color: var(--accent);
+}
+
+.changelog-codebox .changelog-entry-header--bloodcraft {
+  --changelog-entry-accent: rgba(196, 30, 58, 0.75);
+}
+
+.changelog-codebox .changelog-entry-header--vdebug .changelog-entry-version {
+  border-color: rgba(139, 92, 246, 0.35);
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--accent2);
+}
+
+.changelog-codebox .changelog-entry-header--vdebug {
+  --changelog-entry-accent: rgba(139, 92, 246, 0.75);
+}
+
+.changelog-codebox .changelog-entry-date {
+  margin-top: calc(var(--space-2) * -1);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--fg2);
+}
+
+.changelog-codebox h1,
+.changelog-codebox h2,
+.changelog-codebox h3,
+.changelog-codebox h4,
+.changelog-codebox h5,
+.changelog-codebox h6 {
+  font-family: var(--font-mono);
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.changelog-codebox h1 {
+  color: var(--fg0);
+  margin-top: 0;
+}
+
+.changelog-codebox hr {
+  height: 1px;
+  background: var(--border-color);
+  margin: var(--space-6) 0;
+}

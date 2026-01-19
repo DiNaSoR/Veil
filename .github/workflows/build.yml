@@ -1,0 +1,149 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      NEW_SHARED_KEY: ${{ secrets['NEW_SHARED_KEY'] }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+
+      - name: Extract versions from .csproj
+        id: extract_versions
+        run: |
+          eclipse_version=$(xmllint --xpath "string(//Project/PropertyGroup/Version)" "Client/EclipsePlus/EclipsePlus.csproj")
+          bloodcraft_version=$(xmllint --xpath "string(//Project/PropertyGroup/Version)" "Server/Bloodcraftplus/Bloodcraftplus.csproj")
+
+          echo "eclipse_version=$eclipse_version" >> $GITHUB_OUTPUT
+          echo "bloodcraft_version=$bloodcraft_version" >> $GITHUB_OUTPUT
+
+      - name: Update thunderstore.toml versions
+        run: |
+          sed -i "s/versionNumber = \".*\"/versionNumber = \"${{ steps.extract_versions.outputs.eclipse_version }}\"/" Client/EclipsePlus/thunderstore.toml
+          sed -i "s/versionNumber = \".*\"/versionNumber = \"${{ steps.extract_versions.outputs.bloodcraft_version }}\"/" Server/Bloodcraftplus/thunderstore.toml
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          if [ -n "$(git status --porcelain Client/EclipsePlus/thunderstore.toml Server/Bloodcraftplus/thunderstore.toml)" ]; then
+            git add Client/EclipsePlus/thunderstore.toml Server/Bloodcraftplus/thunderstore.toml
+            git commit -m "chore: sync thunderstore.toml versions (EclipsePlus ${{ steps.extract_versions.outputs.eclipse_version }}, Bloodcraftplus ${{ steps.extract_versions.outputs.bloodcraft_version }})"
+            git push
+          else
+            echo "No changes to commit in thunderstore.toml files"
+          fi
+          
+      - name: Create secrets.json
+        run: |
+          mkdir -p "${{ github.workspace }}/Client/EclipsePlus/Resources"
+          mkdir -p "${{ github.workspace }}/Server/Bloodcraftplus/Resources"
+          cat > "${{ github.workspace }}/Client/EclipsePlus/Resources/secrets.json" <<EOF
+          {
+            "NEW_SHARED_KEY": "${NEW_SHARED_KEY}"
+          }
+          EOF
+
+          cat > "${{ github.workspace }}/Server/Bloodcraftplus/Resources/secrets.json" <<EOF
+          {
+            "NEW_SHARED_KEY": "${NEW_SHARED_KEY}"
+          }
+          EOF
+
+      - name: Restore
+        run: |
+          dotnet restore Client/EclipsePlus/EclipsePlus.csproj
+          dotnet restore Server/Bloodcraftplus/Bloodcraftplus.csproj
+          
+      - name: Build EclipsePlus (Release)
+        run: dotnet build Client/EclipsePlus/EclipsePlus.csproj --configuration Release -p:Version=${{ steps.extract_versions.outputs.eclipse_version }} -p:RunGenerateREADME=false
+
+      - name: Build Bloodcraftplus (Release)
+        run: dotnet build Server/Bloodcraftplus/Bloodcraftplus.csproj --configuration Release -p:Version=${{ steps.extract_versions.outputs.bloodcraft_version }} -p:RunGenerateREADME=false
+
+      - name: GH Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          body: |
+            # 🧛 Release v${{ steps.extract_versions.outputs.eclipse_version }}
+
+            <div align="center">
+            
+            ![V Rising Mod](https://img.shields.io/badge/V%20Rising-Mod-red?style=for-the-badge&logo=steam)
+            ![EclipsePlus](https://img.shields.io/badge/Client-EclipsePlus%20v${{ steps.extract_versions.outputs.eclipse_version }}-blue?style=for-the-badge)
+            ![Bloodcraftplus](https://img.shields.io/badge/Server-Bloodcraftplus%20v${{ steps.extract_versions.outputs.bloodcraft_version }}-green?style=for-the-badge)
+            
+            </div>
+
+            ---
+
+            ## 📦 Downloads
+
+            | Mod | Type | Version | Description |
+            |-----|------|---------|-------------|
+            | **EclipsePlus.dll** | 🖥️ Client | `v${{ steps.extract_versions.outputs.eclipse_version }}` | Install on your game client |
+            | **Bloodcraftplus.dll** | 🖧 Server | `v${{ steps.extract_versions.outputs.bloodcraft_version }}` | Install on your server |
+
+            ---
+
+            ## 🚀 Installation
+
+            ### Client (EclipsePlus)
+            1. Download `EclipsePlus.dll`
+            2. Place in `VRising/BepInEx/plugins/`
+            3. Launch the game
+
+            ### Server (Bloodcraftplus)
+            1. Download `Bloodcraftplus.dll`
+            2. Place in `VRisingServer/BepInEx/plugins/`
+            3. Restart the server
+
+            ---
+
+            <div align="center">
+            
+            Made with ❤️ for the V Rising modding community
+            
+            </div>
+          name: v${{ steps.extract_versions.outputs.eclipse_version }}-bc${{ steps.extract_versions.outputs.bloodcraft_version }}
+          fail_on_unmatched_files: true
+          prerelease: true
+          tag_name: v${{ steps.extract_versions.outputs.eclipse_version }}-bc${{ steps.extract_versions.outputs.bloodcraft_version }}
+          generate_release_notes: false
+          files: |
+            ./Client/EclipsePlus/bin/Release/net6.0/EclipsePlus.dll
+            ./Server/Bloodcraftplus/bin/Release/net6.0/Bloodcraftplus.dll
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Thunderstore CLI (tcli)
+        run: dotnet tool install --global tcli
+
+      - name: Publish EclipsePlus to Thunderstore
+        run: |
+          cd Client/EclipsePlus
+          tcli publish --token "${{ secrets.THUNDERSTORE_KEY }}" --package-version "${{ steps.extract_versions.outputs.eclipse_version }}"
+        continue-on-error: true
+
+      - name: Publish Bloodcraftplus to Thunderstore
+        run: |
+          cd Server/Bloodcraftplus
+          tcli publish --token "${{ secrets.THUNDERSTORE_KEY }}" --package-version "${{ steps.extract_versions.outputs.bloodcraft_version }}"
+        continue-on-error: true

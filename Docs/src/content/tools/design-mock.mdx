@@ -1,0 +1,232 @@
+# Design Mock
+
+The Design Mock is a Vite + React + TypeScript prototype of the BloodCraftPlus UI, used for designing and testing UI layouts before implementation.
+
+## Overview
+
+Located at `Tools/DesignMock/`, this tool provides:
+- Visual mockup of Character Menu tabs
+- CSS tokens matching in-game styling
+- Interactive prototyping with React state
+- Reference for Unity UI implementation
+- Modular component architecture
+
+---
+
+## Purpose
+
+### Design Before Code
+
+The mock allows rapid iteration on UI designs:
+1. Design in React components (fast iteration with hot reload)
+2. Test layouts and interactions
+3. Get approval on visuals
+4. Implement in Unity (guided by mock)
+
+### Reference Implementation
+
+The CSS tokens and component structure serve as documentation:
+- Color palette definitions
+- Spacing and sizing values
+- Component patterns
+- Typography guidelines
+
+---
+
+## Quick Start
+
+```bash
+cd Tools/DesignMock
+npm install
+npm run dev
+```
+
+This starts a local dev server with hot module replacement. Open the URL shown in the terminal (typically `http://localhost:5173`).
+
+### Build for Distribution
+
+```bash
+npm run build
+```
+
+Output is written to `Tools/DesignMock/dist/`. To preview the built version:
+
+```bash
+npm run preview
+```
+
+---
+
+## Structure
+
+```
+Tools/DesignMock/
+├── index.html                    # Vite entry HTML
+├── package.json                  # Dependencies and scripts
+├── vite.config.ts                # Vite configuration
+├── tsconfig.json                 # TypeScript configuration
+├── src/
+│   ├── main.tsx                  # React entry point
+│   ├── App.tsx                   # Main app component
+│   ├── features/
+│   │   ├── equipment/            # Equipment panel
+│   │   └── bloodcraft/           # Bloodcraft panel and tabs
+│   │       ├── BloodcraftPanel.tsx
+│   │       └── tabs/
+│   │           ├── Prestige/
+│   │           ├── Exoform/
+│   │           ├── StatBonuses/
+│   │           ├── Progression/
+│   │           └── Familiars/
+│   ├── shared/
+│   │   ├── components/           # Reusable UI components
+│   │   └── types/                # TypeScript types
+│   └── mock-data/                # Sample data for the mock
+├── styles/
+│   ├── design-mock.css           # CSS import entrypoint
+│   ├── design-mock.tokens.css    # Design tokens
+│   ├── design-mock.base.css      # Base styles
+│   ├── design-mock.core.css      # Core styles
+│   └── design-mock.*.css         # Feature-specific styles
+├── public/
+│   └── assets/
+│       └── sprites/              # UI sprites from game
+└── legacy/                       # Archived original HTML/JS version
+```
+
+---
+
+## Using the Mock
+
+### Development
+
+1. Run `npm run dev` to start the dev server
+2. Edit React components in `src/features/`
+3. Changes hot-reload automatically
+4. CSS changes also hot-reload
+
+### Adding New UI
+
+1. Create a new component in the appropriate `features/` directory
+2. Use existing shared components from `shared/components/`
+3. Add mock data to `mock-data/index.ts` if needed
+4. Import and render in the parent component
+
+### CSS Tokens
+
+The token file defines reusable values:
+
+```css
+:root {
+  /* Dimensions */
+  --panel-width: 596px;
+  --panel-height: 698px;
+  --header-height: 80px;
+  
+  /* Typography */
+  --title-font: "Cinzel", serif;
+  --body-font: "Cinzel", serif;
+  
+  /* Colors */
+  --accent: rgba(128, 12, 16, 0.45);
+  --header-tint: rgba(26, 26, 31, 0.95);
+  
+  /* ...more tokens */
+}
+```
+
+---
+
+## Component Architecture
+
+The mock uses a modular component structure:
+
+- **App** - Main container with main tab state
+- **EquipmentPanel** - Equipment tab content
+- **BloodcraftPanel** - Bloodcraft tab with sub-tab navigation
+  - **PrestigeTab** - Leaderboard UI
+  - **ExoformTab** - Transformation UI
+  - **StatBonusesTab** - Weapon/Blood stat selection
+  - **ProgressionTab** - Professions and Class modes
+  - **FamiliarsTab** - Familiar management, battles, talents
+
+### Shared Components
+
+- `Card` / `CardHeader` - Panel cards with headers
+- `Select` - Dropdown selects
+- `Divider` - Horizontal dividers
+- `ActionRow` - Clickable action rows
+- `ChipGrid` - Selectable chip buttons
+
+---
+
+## Assets
+
+### Sprites
+
+Game sprites are located at `public/assets/sprites/`:
+- Window backgrounds
+- Tab buttons
+- Icons and decorations
+- Dividers and frames
+
+### Fonts
+
+The mock uses web fonts that approximate the game fonts:
+- Cinzel (titles and body)
+
+---
+
+## Tabs in Mock
+
+The mockup includes all Character Menu tabs:
+
+| Tab | Description |
+|-----|-------------|
+| Equipment | Gear slots and inventory |
+| Bloodcraft | RPG systems hub |
+| - Prestige | Leaderboards |
+| - Exoform | Transformation UI |
+| - Stat Bonuses | Weapon/Blood stat selection |
+| - Progression | Professions and Class |
+| - Familiars | Full familiar management |
+
+---
+
+## Translation to Unity
+
+When implementing in Unity, translate:
+
+| React/CSS Concept | Unity Equivalent |
+|-------------------|------------------|
+| `width/height` | `RectTransform` sizeDelta |
+| `padding` | `LayoutGroup` padding |
+| `gap` | `LayoutGroup` spacing |
+| `background-image` | `Image` sprite |
+| `color` | `Image.color` / `TMP_Text.color` |
+| `font-size` | `TMP_Text.fontSize` |
+| `useState` | Component state / service data |
+| `onClick` | `SimpleStunButton` or event handlers |
+
+---
+
+## Notes
+
+### Not a Live Preview
+
+The mock is a **design reference**, not a live preview:
+- Some game-specific behaviors aren't replicated
+- Unity layout may need adjustments
+- Use as guidance, not specification
+
+### Keeping in Sync
+
+When updating UI:
+1. Update mock first
+2. Get design approval
+3. Implement in Unity
+4. Update mock if implementation differs
+
+### Legacy Version
+
+The original static HTML/CSS/JS implementation is archived in `Tools/DesignMock/legacy/` for reference.
