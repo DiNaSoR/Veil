@@ -82,7 +82,7 @@ if ($Format -eq "AI") {
     $uniqueFiles = $allMatches | ForEach-Object { $_.Path } | Sort-Object -Unique
     Write-Host "Files to read:"
     foreach ($f in $uniqueFiles) {
-      $relative = $f.Replace($RepoRoot, "").TrimStart("\", "/")
+      $relative = $f.Replace($RepoRoot, "").TrimStart('\','/')
       Write-Host "  @$relative"
     }
   }
