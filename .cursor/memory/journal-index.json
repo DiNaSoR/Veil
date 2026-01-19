@@ -5,7 +5,7 @@
         "Tags":  [
                      "Process"
                  ],
-        "Title":  "Initialized memory system (Memory v3.2.1)",
+        "Title":  "Initialized memory system (Memory v3.2.2)",
         "Files":  [
                       ".cursor/memory/*",
                       ".cursor/rules/00-memory-system.mdc",

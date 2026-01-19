@@ -19,3 +19,8 @@ Linter validates tags against this list.
 - [DX] - developer experience, tooling, maintainability
 - [Reliability] - crash prevention, guardrails, self-healing
 - [Process] - workflow, memory system, tooling changes
+
+# Common "type" tags (used by templates/examples)
+- [Fix] - bug fixes, regressions, patches
+- [Feature] - new behavior/capability
+- [Refactor] - restructuring without behavior changes

@@ -1,5 +1,5 @@
 <#
-setup-cursor-memory.ps1 (Memory v3.2.1)
+setup-cursor-memory.ps1 (Memory v3.2.2)
 Windows-first, token-safe, scalable repo memory for Cursor (or any AI agent).
 
 Merged from v3 (our helpers) + GPT v3.1 (BOM handling, tag validation, portable hooks):
@@ -265,7 +265,7 @@ $journalMonth = @"
 
 ## $today
 
-- [Process] Initialized memory system (Memory v3.2.1)
+- [Process] Initialized memory system (Memory v3.2.2)
   - Why: token-safe AI memory + indexed retrieval + portable hooks
   - Key files:
     - ``.cursor/memory/*``
@@ -319,6 +319,11 @@ Linter validates tags against this list.
 - [DX] - developer experience, tooling, maintainability
 - [Reliability] - crash prevention, guardrails, self-healing
 - [Process] - workflow, memory system, tooling changes
+
+# Common "type" tags (used by templates/examples)
+- [Fix] - bug fixes, regressions, patches
+- [Feature] - new behavior/capability
+- [Refactor] - restructuring without behavior changes
 "@
 
 $regChecklist = @"
@@ -436,8 +441,9 @@ Write-TextFile (Join-Path $TemplatesDir "adr.template.md") $templateAdr -ForceWr
 
 $memoryRule = @"
 ---
-description: Memory System v3.2.1 - Authority + Atomic Retrieval + Token Safety
-globs: ["**/*"]
+description: Memory System v3.2.2 - Authority + Atomic Retrieval + Token Safety
+globs:
+  - "**/*"
 alwaysApply: true
 ---
 
@@ -1697,20 +1703,27 @@ $hookBody = @'
 #!/bin/sh
 # Cursor Memory: auto-rebuild indexes + lint before commit
 
+set -e
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT"
+
 echo "[CursorMemory] Rebuilding indexes..."
 if command -v powershell.exe >/dev/null 2>&1; then
-  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" || exit 1
-  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1" || exit 1
+  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1"
+  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1"
 elif command -v pwsh >/dev/null 2>&1; then
-  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" || exit 1
-  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1" || exit 1
+  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1"
+  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1"
+else
+  echo "[CursorMemory] PowerShell not found; skipping memory rebuild/lint."
 fi
 
-git add .cursor/memory/lessons/index.md 2>/dev/null
-git add .cursor/memory/lessons-index.json 2>/dev/null
-git add .cursor/memory/journal-index.md 2>/dev/null
-git add .cursor/memory/journal-index.json 2>/dev/null
-git add .cursor/memory/digests/*.digest.md 2>/dev/null
+git add .cursor/memory/lessons/index.md 2>/dev/null || true
+git add .cursor/memory/lessons-index.json 2>/dev/null || true
+git add .cursor/memory/journal-index.md 2>/dev/null || true
+git add .cursor/memory/journal-index.json 2>/dev/null || true
+git add .cursor/memory/digests/*.digest.md 2>/dev/null || true
 
 exit 0
 '@
@@ -1762,23 +1775,36 @@ if ($totalChars -gt 8000) {
   Write-Host "Always-read layer: $totalChars chars (~$estimatedTokens tokens) - Healthy" -ForegroundColor Green
 }
 
-# Auto-add memory.sqlite to .gitignore
+# Auto-add memory.sqlite to .gitignore (BOM-safe, preserves existing line endings)
 $giPath = Join-Path $RepoRoot ".gitignore"
 $sqliteLine = ".cursor/memory/memory.sqlite"
+$giHeader = "# Cursor Memory System (generated)"
+$block = "$giHeader`n$sqliteLine"
+
+$giLineEndings = "CRLF"
+$giContent = ""
+
 if (Test-Path $giPath) {
-  $giContent = Get-Content -Raw -ErrorAction SilentlyContinue $giPath
+  $giContent = Get-Content -Raw -Encoding UTF8 -ErrorAction SilentlyContinue $giPath
+  if ($giContent.Length -gt 0 -and [int]$giContent[0] -eq 0xFEFF) { $giContent = $giContent.Substring(1) }
+  $giLineEndings = if ($giContent -match "`r`n") { "CRLF" } else { "LF" }
+
   if ($giContent -notmatch [regex]::Escape($sqliteLine)) {
-    Add-Content -Encoding UTF8 $giPath "`r`n# Cursor Memory System (generated)`r`n$sqliteLine"
+    $trimmed = $giContent.TrimEnd("`r","`n")
+    $newContent = $trimmed + "`n`n" + $block.Trim() + "`n"
+    Write-TextFile $giPath $newContent -ForceWrite:$true -LineEndings $giLineEndings
     Write-Host "Updated .gitignore: $sqliteLine" -ForegroundColor Green
+  } else {
+    Write-Host "SKIP (.gitignore already contains): $sqliteLine" -ForegroundColor DarkYellow
   }
 } else {
-  $enc = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($giPath, "# Cursor Memory System (generated)`r`n$sqliteLine`r`n", $enc)
+  $newContent = $block.Trim() + "`n"
+  Write-TextFile $giPath $newContent -ForceWrite:$true -LineEndings "CRLF"
   Write-Host "Created .gitignore with: $sqliteLine" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "Setup complete. (Memory System v3.2.1)" -ForegroundColor Green
+Write-Host "Setup complete. (Memory System v3.2.2)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1) Run: powershell -ExecutionPolicy Bypass -File scripts/memory/rebuild-memory-index.ps1" -ForegroundColor White
