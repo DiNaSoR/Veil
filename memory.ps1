@@ -1,21 +1,25 @@
 <#
-setup-cursor-memory.ps1
-Creates a scalable Cursor memory system (Memory v3):
+setup-cursor-memory.ps1 (Memory v3.2)
+Windows-first, token-safe, scalable repo memory for Cursor (or any AI agent).
+
+Merged from v3 (our helpers) + GPT v3.1 (BOM handling, tag validation, portable hooks):
 - Curated "always read" memory: hot-rules.md + active-context.md + memo.md
-- Atomic lessons (individual files) + auto-generated lessons index
+- Atomic lessons (individual files) with strict YAML frontmatter
 - Monthly journal + auto-generated digest + journal index
 - Cursor rule (.mdc) to enforce behavior
-- Helper scripts: rebuild indexes, query, lint, add-lesson, add-journal-entry
-- Optional SQLite FTS index (Python-based, if Python is available)
+- Helper scripts: rebuild, query (SQLite+grep), lint, add-lesson, add-journal-entry
+- Tag validation against tag-vocabulary.md
+- BOM-tolerant parsing
+- Portable hooks via .githooks/ + .git/hooks/
+- Lint runs on pre-commit
 
 USAGE (from repo root):
-  powershell -ExecutionPolicy Bypass -File .\setup-cursor-memory.ps1
-  powershell -ExecutionPolicy Bypass -File .\setup-cursor-memory.ps1 -ProjectName "MyProject"
-  powershell -ExecutionPolicy Bypass -File .\setup-cursor-memory.ps1 -Force
+  powershell -ExecutionPolicy Bypass -File .\memory.ps1
+  powershell -ExecutionPolicy Bypass -File .\memory.ps1 -ProjectName "MyProject"
+  powershell -ExecutionPolicy Bypass -File .\memory.ps1 -Force
 
-NOTES:
-- By default it will NOT overwrite existing files.
-- Use -Force to overwrite files created by this script.
+After setup, run:
+  git config core.hooksPath .githooks
 #>
 
 [CmdletBinding()]
@@ -28,31 +32,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Write-Utf8NoBom {
-  param(
-    [Parameter(Mandatory=$true)][string]$Path,
-    [Parameter(Mandatory=$true)][string]$Content,
-    [switch]$ForceWrite
-  )
-
-  $dir = Split-Path -Parent $Path
-  if ($dir -and !(Test-Path $dir)) {
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  }
-
-  if ((Test-Path $Path) -and (-not $ForceWrite)) {
-    Write-Host "SKIP (exists): $Path" -ForegroundColor DarkYellow
-    return
-  }
-
-  # Normalize line endings to CRLF for Windows readability
-  $normalized = ($Content -replace "`r?`n", "`r`n")
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($Path, $normalized, $utf8NoBom)
-
-  Write-Host "WROTE: $Path" -ForegroundColor Green
-}
-
 function Ensure-Dir {
   param([Parameter(Mandatory=$true)][string]$Path)
   if (!(Test-Path $Path)) {
@@ -61,23 +40,54 @@ function Ensure-Dir {
   }
 }
 
+function Write-TextFile {
+  param(
+    [Parameter(Mandatory=$true)][string]$Path,
+    [Parameter(Mandatory=$true)][string]$Content,
+    [ValidateSet("CRLF","LF")][string]$LineEndings = "CRLF",
+    [switch]$ForceWrite
+  )
+
+  $dir = Split-Path -Parent $Path
+  if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+
+  if ((Test-Path $Path) -and (-not $ForceWrite)) {
+    Write-Host "SKIP (exists): $Path" -ForegroundColor DarkYellow
+    return
+  }
+
+  $normalized = $Content
+  if ($LineEndings -eq "CRLF") {
+    $normalized = ($normalized -replace "`r?`n", "`r`n")
+  } else {
+    $normalized = ($normalized -replace "`r?`n", "`n")
+  }
+
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $normalized, $enc)
+
+  Write-Host "WROTE: $Path" -ForegroundColor Green
+}
+
 $RepoRoot = (Resolve-Path $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ProjectName)) {
   $ProjectName = Split-Path -Leaf $RepoRoot
 }
 
 # Paths
-$CursorDir   = Join-Path $RepoRoot ".cursor"
-$MemoryDir   = Join-Path $CursorDir "memory"
-$RulesDir    = Join-Path $CursorDir "rules"
-$JournalDir  = Join-Path $MemoryDir "journal"
-$DigestsDir  = Join-Path $MemoryDir "digests"
-$AdrDir      = Join-Path $MemoryDir "adr"
-$LessonsDir  = Join-Path $MemoryDir "lessons"
-$TemplatesDir= Join-Path $MemoryDir "templates"
-$ScriptsDir  = Join-Path $RepoRoot "scripts"
-$MemScripts  = Join-Path $ScriptsDir "memory"
-$GitHooksDir = Join-Path $RepoRoot ".git\hooks"
+$CursorDir    = Join-Path $RepoRoot ".cursor"
+$MemoryDir    = Join-Path $CursorDir "memory"
+$RulesDir     = Join-Path $CursorDir "rules"
+$JournalDir   = Join-Path $MemoryDir "journal"
+$DigestsDir   = Join-Path $MemoryDir "digests"
+$AdrDir       = Join-Path $MemoryDir "adr"
+$LessonsDir   = Join-Path $MemoryDir "lessons"
+$TemplatesDir = Join-Path $MemoryDir "templates"
+$ScriptsDir   = Join-Path $RepoRoot "scripts"
+$MemScripts   = Join-Path $ScriptsDir "memory"
+$GitDir       = Join-Path $RepoRoot ".git"
+$GitHooksDir  = Join-Path $GitDir "hooks"
+$GithooksDir  = Join-Path $RepoRoot ".githooks"
 
 Ensure-Dir $CursorDir
 Ensure-Dir $MemoryDir
@@ -89,6 +99,7 @@ Ensure-Dir $LessonsDir
 Ensure-Dir $TemplatesDir
 Ensure-Dir $ScriptsDir
 Ensure-Dir $MemScripts
+Ensure-Dir $GithooksDir
 
 $month = (Get-Date -Format "yyyy-MM")
 $today = (Get-Date -Format "yyyy-MM-dd")
@@ -100,57 +111,51 @@ $today = (Get-Date -Format "yyyy-MM-dd")
 $indexMd = @"
 # Memory Index
 
-This is the entry point for the repository memory system.
+Entry point for repo memory.
 
-## Read order (fast + token-safe)
+## Read order (token-safe)
 
-ALWAYS READ:
-1) `hot-rules.md` (tiny do-not-break list, <20 lines)
-2) `memo.md` (current truth + ownership + active context)
+ALWAYS READ (in order):
+1) ``hot-rules.md`` (tiny invariants, <20 lines)
+2) ``active-context.md`` (this session only)
+3) ``memo.md`` (long-term current truth + ownership)
 
-READ IF RELEVANT (search first, open only what matches):
-3) `lessons/index.md` (fast lookup - shows all lesson IDs and rules)
-4) `lessons/L-XXX-*.md` (open ONLY the specific lesson you need)
-5) `digests/` (monthly digest - read before raw journal)
-6) `journal/` (raw history - only for archaeology)
+SEARCH FIRST, THEN OPEN ONLY WHAT MATCHES:
+4) ``lessons/index.md`` -> find lesson ID(s)
+5) ``lessons/L-XXX-*.md`` -> open only specific lesson(s)
+6) ``digests/YYYY-MM.digest.md`` -> before raw journal
+7) ``journal/YYYY-MM.md`` -> only for archaeology
 
-## Memory map
+## Files
 
-- Hot rules: `hot-rules.md`
-- Current truth + Active context: `memo.md`
-- Lessons (individual files): `lessons/L-XXX-title.md`
-- Lessons index (generated): `lessons/index.md` + `lessons-index.json`
-- Journal (monthly): `journal/YYYY-MM.md`
-- Journal index (generated): `journal-index.md` + `journal-index.json`
-- Monthly digests (generated): `digests/YYYY-MM.digest.md`
-- Regression checklist: `regression-checklist.md`
-- Tag vocabulary: `tag-vocabulary.md`
-- ADRs: `adr/`
+- Hot rules: ``hot-rules.md``
+- Active context: ``active-context.md``
+- Memo: ``memo.md``
+- Lessons: ``lessons/``
+- Lesson index (generated): ``lessons/index.md`` + ``lessons-index.json``
+- Journal monthly: ``journal/YYYY-MM.md``
+- Journal index (generated): ``journal-index.md`` + ``journal-index.json``
+- Digests (generated): ``digests/YYYY-MM.digest.md``
+- Tag vocabulary: ``tag-vocabulary.md``
+- Regression checklist: ``regression-checklist.md``
+- ADRs: ``adr/``
 
-## How to add new memory
+## Maintenance commands
 
-- Non-obvious bug or regression -> create a new lesson file in `lessons/`
-- Any meaningful feature/fix -> add a journal entry (monthly file)
-- Any stable truth change -> update memo.md and bump the date
-- Session context -> update the Active Context section in memo.md
-- Any big design/refactor decision -> add an ADR
-
-## Indexing workflow
-
-Indexes are rebuilt automatically via Git pre-commit hook.
-Manual rebuild: `scripts/memory/rebuild-memory-index.ps1`
-
-This regenerates:
-- lessons/index.md + lessons-index.json
-- journal-index.md + journal-index.json
-- digests/YYYY-MM.digest.md
-- memory.sqlite (if Python exists)
+Helper scripts:
+- Add lesson: ``scripts/memory/add-lesson.ps1 -Title "..." -Tags "..." -Rule "..."``
+- Add journal: ``scripts/memory/add-journal-entry.ps1 -Tags "..." -Title "..."``
+- Rebuild indexes: ``scripts/memory/rebuild-memory-index.ps1``
+- Lint: ``scripts/memory/lint-memory.ps1``
+- Query (grep): ``scripts/memory/query-memory.ps1 -Query "..."``
+- Query (SQLite): ``scripts/memory/query-memory.ps1 -Query "..." -UseSqlite``
+- Clear session: ``scripts/memory/clear-active.ps1``
 "@
 
 $hotRules = @"
 # Hot Rules (MUST READ)
 
-Keep this file <20 lines. Move content to memo/lessons if it grows.
+Keep this file under ~20 lines. If it grows, move content into memo or lessons.
 
 ## Authority Order (highest to lowest)
 1) Lessons override EVERYTHING (including active-context)
@@ -167,29 +172,25 @@ Keep this file <20 lines. Move content to memo/lessons if it grows.
 $activeContext = @"
 # Active Context (Session Scratchpad)
 
-This file captures the **current session state**. It takes priority over older journal entries.
+Priority: this overrides older journal history *for this session only*.
 
-**CLEAR THIS FILE** when your task is done (run ``scripts/memory/clear-active.ps1``).
+CLEAR this file when the task is done:
+- Run ``scripts/memory/clear-active.ps1``
 
 ## Current Goal
-
-- 
+-
 
 ## Files in Focus
+-
 
-- 
-
-## Recent Attempts / Findings
-
-- 
+## Findings / Decisions
+-
 
 ## Temporary Constraints
-
-- 
+-
 
 ## Blockers
-
-- 
+-
 "@
 
 $memo = @"
@@ -197,7 +198,7 @@ $memo = @"
 
 Last updated: $today
 
-## Ownership map
+## Ownership map (fill early)
 
 - UI / Frontend owner: <path/module>
 - Backend / Server owner: <path/module>
@@ -206,36 +207,32 @@ Last updated: $today
 
 ## Current truth (high-signal)
 
-- <Add invariants that are true right now>
-- <Add key toggles/defaults that must not drift>
-- <Add any critical lifecycle/timing rules>
+- <invariants that must stay true>
+- <important defaults/toggles>
+- <timing/lifecycle rules>
+- <anything that prevents regressions>
 
 ## Open questions / TODO
-
-- <What is unknown or risky?>
+- <unknowns / risks>
 "@
 
 $lessonsReadme = @"
-# Lessons
+# Lessons (Atomic)
 
-Each lesson is a separate file with YAML frontmatter for fast, reliable parsing.
+Each lesson is a separate file with strict YAML frontmatter (controlled schema).
 
-## File naming
+Naming:
+- ``L-001-short-title.md``
 
-``L-XXX-short-title.md`` (e.g., ``L-001-always-flush-after-render.md``)
+Why:
+- token efficiency (open only the one lesson you need)
+- fast lookup via ``lessons/index.md``
+- easy pruning / superseding
 
-## Creating a new lesson
-
-1. Copy ``templates/lesson.template.md`` to this folder
-2. Rename to ``L-XXX-short-title.md`` (use the next available number)
-3. Fill in the YAML frontmatter and content
-4. Run ``scripts/memory/rebuild-memory-index.ps1`` (or commit to trigger auto-rebuild)
-
-## Why individual files?
-
-- **Token efficiency**: AI loads only the specific lesson it needs (~200 tokens vs 20k+)
-- **Fast search**: Cursor's @-search works best on filenames
-- **Easy maintenance**: Edit/delete individual lessons without touching others
+Create a lesson:
+- Run ``scripts/memory/add-lesson.ps1 -Title "..." -Tags "..." -Rule "..."``
+- Or copy ``templates/lesson.template.md`` -> ``lessons/L-XXX-title.md``
+- Then run ``scripts/memory/rebuild-memory-index.ps1``
 "@
 
 $lessonsIndex = @"
@@ -243,22 +240,24 @@ $lessonsIndex = @"
 
 Generated by ``scripts/memory/rebuild-memory-index.ps1``.
 
-Format: ID | [Tags] | AppliesTo | Rule
+Format: ID | [Tags] | AppliesTo | Rule | File
 
-(No lessons yet. Create your first lesson in the lessons/ folder.)
+(No lessons yet.)
 "@
 
 $journalReadme = @"
 # Journal
 
-- One file per month: `YYYY-MM.md`
-- Each date appears once per file.
-- Keep entries high-signal (what changed / why / key files).
-- Put long narratives in Docs/WorkLogs and link them from the journal.
+Monthly file: ``YYYY-MM.md``
 
-Rule of thumb:
-- The journal is history.
-- The digest is what the AI should read first.
+Rules:
+- Each date appears ONCE per file: ``## YYYY-MM-DD``
+- Put multiple entries under that header as bullets.
+- Keep it high-signal: what changed, why, key files.
+- Put long narratives in Docs/WorkLogs and link them.
+
+Add entries via:
+- ``scripts/memory/add-journal-entry.ps1 -Tags "UI,Fix" -Title "..."``
 "@
 
 $journalMonth = @"
@@ -266,43 +265,44 @@ $journalMonth = @"
 
 ## $today
 
-- [Process] Initialized memory system (Memory v3)
-  - Why: Establish scalable AI memory (curated truth + indexed retrieval + digest layer)
+- [Process] Initialized memory system (Memory v3.2)
+  - Why: token-safe AI memory + indexed retrieval + portable hooks
   - Key files:
-    - `.cursor/memory/*`
-    - `.cursor/rules/00-memory-system.mdc`
-    - `scripts/memory/*`
+    - ``.cursor/memory/*``
+    - ``.cursor/rules/00-memory-system.mdc``
+    - ``scripts/memory/*``
 "@
 
 $digestsReadme = @"
 # Digests
 
-Digests are generated summaries of journal months.
-
-Purpose:
-- Give the AI a small, token-cheap overview of what changed.
-- Avoid reading the raw journal unless needed.
+Generated summaries of journal months.
+AI should read digests before raw journal.
 
 Generated by:
-- `scripts/memory/rebuild-memory-index.ps1`
+- ``scripts/memory/rebuild-memory-index.ps1``
 "@
 
 $adrReadme = @"
-# ADRs (Architecture Decision Records)
+# ADRs
 
-Use ADRs for decisions that explain "why we built it this way".
+Architecture Decision Records: why we did it this way.
 
 Naming:
-- `ADR-001-short-title.md`
-- Keep them short: Context -> Decision -> Consequences
+- ``ADR-001-short-title.md``
+
+Format:
+- Context
+- Decision
+- Consequences
 "@
 
 $tagVocab = @"
-# Tag Vocabulary
+# Tag Vocabulary (fixed set)
 
-Use a small fixed vocabulary so search stays reliable.
+Use a small vocabulary so retrieval stays reliable.
+Linter validates tags against this list.
 
-Recommended tags:
 - [UI] - UI behavior, rendering, interaction
 - [Layout] - layout groups, anchors, sizing, rects
 - [Input] - mouse/keyboard/controller input rules
@@ -318,106 +318,96 @@ Recommended tags:
 - [Architecture] - module boundaries, refactors, ownership
 - [DX] - developer experience, tooling, maintainability
 - [Reliability] - crash prevention, guardrails, self-healing
+- [Process] - workflow, memory system, tooling changes
 "@
 
 $regChecklist = @"
 # Regression Checklist
 
-Only run what is relevant to your change.
+Run only what is relevant.
 
-## Build / Compile
+## Build
 - [ ] Build solution / affected projects
-- [ ] No new warnings introduced (or documented)
+- [ ] No new warnings (or documented)
 
-## Runtime / In-Game / Manual (if applicable)
-- [ ] UI renders (core screens)
-- [ ] Primary interactions still work (clicks, dropdowns, tabs)
-- [ ] No obvious null refs / spam logs
+## Runtime (if applicable)
+- [ ] Core UI renders
+- [ ] Core interactions work
+- [ ] No obvious errors/log spam
 
-## Data / Sync (if applicable)
-- [ ] Parsing still works on known payloads
-- [ ] State updates do not regress (stale UI, wrong mapping)
+## Data (if applicable)
+- [ ] Parsing works on known payloads
+- [ ] State updates do not regress
 
 ## Docs (if applicable)
-- [ ] Updated docs pages
-- [ ] Updated changelog
+- [ ] Journal updated
+- [ ] Memo updated (if truth changed)
+- [ ] Lesson added (if pitfall discovered)
 "@
 
-# Write memory files
-Write-Utf8NoBom (Join-Path $MemoryDir "index.md") $indexMd -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemoryDir "hot-rules.md") $hotRules -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemoryDir "active-context.md") $activeContext -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemoryDir "memo.md") $memo -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $LessonsDir "README.md") $lessonsReadme -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $LessonsDir "index.md") $lessonsIndex -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $JournalDir "README.md") $journalReadme -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $JournalDir "$month.md") $journalMonth -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $DigestsDir "README.md") $digestsReadme -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $AdrDir "README.md") $adrReadme -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemoryDir "tag-vocabulary.md") $tagVocab -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemoryDir "regression-checklist.md") $regChecklist -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "index.md") $indexMd -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "hot-rules.md") $hotRules -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "active-context.md") $activeContext -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "memo.md") $memo -ForceWrite:$Force
+Write-TextFile (Join-Path $LessonsDir "README.md") $lessonsReadme -ForceWrite:$Force
+Write-TextFile (Join-Path $LessonsDir "index.md") $lessonsIndex -ForceWrite:$Force
+Write-TextFile (Join-Path $JournalDir "README.md") $journalReadme -ForceWrite:$Force
+Write-TextFile (Join-Path $JournalDir "$month.md") $journalMonth -ForceWrite:$Force
+Write-TextFile (Join-Path $DigestsDir "README.md") $digestsReadme -ForceWrite:$Force
+Write-TextFile (Join-Path $AdrDir "README.md") $adrReadme -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "tag-vocabulary.md") $tagVocab -ForceWrite:$Force
+Write-TextFile (Join-Path $MemoryDir "regression-checklist.md") $regChecklist -ForceWrite:$Force
 
 # -------------------------
 # Templates
 # -------------------------
+
 $templateLesson = @"
 ---
 id: L-XXX
 title: Short descriptive title
 status: Active
-tags: [UI, Build, Reliability]
+tags: [UI, Reliability]
 introduced: YYYY-MM-DD
 applies_to:
   - path/or/glob/**
 triggers:
-  - error message keyword
+  - error keyword
   - crash signature
-  - related symptom
 rule: One sentence. Imperative. Testable.
+supersedes: ""
 ---
 
 # L-XXX - Short descriptive title
 
 ## Symptom
-
-What the user saw or what broke.
+What broke / what was observed.
 
 ## Root cause
-
-The real reason this happened.
+The real reason.
 
 ## Wrong approach (DO NOT REPEAT)
-
 - What not to do
 - Why it fails
 
 ## Correct approach
-
 - What to do instead
-- Code example if helpful
 
 ## References
-
-- Files: ``path/to/file.cs``
+- Files: ``path/to/file``
 - Journal: ``journal/YYYY-MM.md#YYYY-MM-DD``
-- Related: L-YYY (if superseding another lesson)
 "@
 
 $templateJournal = @"
-# Journal Entry Template
+# Journal Entry Template (paste under an existing date header)
 
 - [Area][Type] Title
   - Why: ...
   - Key files:
-    - `path/to/file`
-  - Notes:
-    - <optional>
-  - Verification:
-    - Build: PASS/FAIL/NOT RUN
-    - Runtime: PASS/FAIL/NOT RUN
-  - Related:
-    - Lesson: L-XXX
-    - ADR: ADR-XXX
+    - ``path/to/file``
+  - Notes: <optional>
+  - Verification: Build PASS/FAIL/NOT RUN; Runtime PASS/FAIL/NOT RUN
+  - Related: Lesson L-XXX; ADR ADR-XXX
 "@
 
 $templateAdr = @"
@@ -430,30 +420,23 @@ Status: Proposed | Accepted | Deprecated
 What problem are we solving?
 
 ## Decision
-What did we choose, specifically?
+What did we choose?
 
 ## Consequences
-What gets better/worse? What do we need to watch out for?
+Tradeoffs, risks, follow-ups.
 "@
 
-$templateDigest = @"
-# Monthly Digest - YYYY-MM
-
-Generated summary of the monthly journal.
-Keep this short. Link to the journal for details.
-"@
-
-Write-Utf8NoBom (Join-Path $TemplatesDir "lesson.template.md") $templateLesson -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $TemplatesDir "journal-entry.template.md") $templateJournal -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $TemplatesDir "adr.template.md") $templateAdr -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $TemplatesDir "digest.template.md") $templateDigest -ForceWrite:$Force
+Write-TextFile (Join-Path $TemplatesDir "lesson.template.md") $templateLesson -ForceWrite:$Force
+Write-TextFile (Join-Path $TemplatesDir "journal-entry.template.md") $templateJournal -ForceWrite:$Force
+Write-TextFile (Join-Path $TemplatesDir "adr.template.md") $templateAdr -ForceWrite:$Force
 
 # -------------------------
 # Cursor rule: enforce memory usage
 # -------------------------
+
 $memoryRule = @"
 ---
-description: Memory System v3 - Authority, Atomic Retrieval, Active Context
+description: Memory System v3.2 - Authority + Atomic Retrieval + Token Safety
 globs:
 alwaysApply: true
 ---
@@ -489,14 +472,14 @@ SEARCH FIRST, THEN FETCH:
 4. Update ``memo.md`` if project truth changed
 5. Clear ``active-context.md`` when task is merged
 
-## Automation
+## Helper Scripts
 
-- Indexes auto-rebuild via Git pre-commit hook
-- Manual: ``scripts/memory/rebuild-memory-index.ps1``
-- Clear session: ``scripts/memory/clear-active.ps1``
+- Add lesson: ``scripts/memory/add-lesson.ps1 -Title "..." -Tags "..." -Rule "..."``
+- Add journal: ``scripts/memory/add-journal-entry.ps1 -Tags "..." -Title "..."``
+- Rebuild: ``scripts/memory/rebuild-memory-index.ps1``
 - Lint: ``scripts/memory/lint-memory.ps1``
-- Add lesson: ``scripts/memory/add-lesson.ps1``
-- Add journal: ``scripts/memory/add-journal-entry.ps1``
+- Query: ``scripts/memory/query-memory.ps1 -Query "..." [-UseSqlite]``
+- Clear: ``scripts/memory/clear-active.ps1``
 
 ## AI Behavior
 
@@ -506,26 +489,31 @@ SEARCH FIRST, THEN FETCH:
 - Don't create parallel systems -> check memo.md ownership map
 "@
 
-Write-Utf8NoBom (Join-Path $RulesDir "00-memory-system.mdc") $memoryRule -ForceWrite:$Force
+Write-TextFile (Join-Path $RulesDir "00-memory-system.mdc") $memoryRule -ForceWrite:$Force
 
 # -------------------------
 # Helper scripts
 # -------------------------
+
 $rebuildIndex = @'
 <#
 rebuild-memory-index.ps1
 Generates:
-- .cursor/memory/lessons/index.md + lessons-index.json
-- .cursor/memory/journal-index.md + journal-index.json
-- .cursor/memory/digests/YYYY-MM.digest.md
+- lessons/index.md + lessons-index.json
+- journal-index.md + journal-index.json
+- digests/YYYY-MM.digest.md
 Optionally:
-- .cursor/memory/memory.sqlite (SQLite FTS index) if Python exists
+- memory.sqlite (if Python exists)
+
+Works on PowerShell 5.1+ (no external deps).
+BOM-tolerant parsing.
 #>
 
 [CmdletBinding()]
-param(
-  [string]$RepoRoot = ""
-)
+param([string]$RepoRoot = "")
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
   if ($PSScriptRoot) {
@@ -535,68 +523,85 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
   }
 }
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
 function Write-Utf8NoBom([string]$FilePath, [string]$Content) {
   $dir = Split-Path -Parent $FilePath
   if ($dir -and !(Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $enc = New-Object System.Text.UTF8Encoding($false)
   $normalized = ($Content -replace "`r?`n", "`r`n")
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($FilePath, $normalized, $utf8NoBom)
+  [System.IO.File]::WriteAllText($FilePath, $normalized, $enc)
 }
 
-# Parse YAML frontmatter from a file (deterministic, tracks current list key explicitly)
-function Parse-YamlFrontmatter([string]$FilePath) {
-  $content = Get-Content -Raw -Encoding UTF8 $FilePath
+function Read-Utf8([string]$Path) {
+  $raw = Get-Content -Raw -Encoding UTF8 $Path
+  # Strip BOM if present
+  if ($raw.Length -gt 0 -and [int]$raw[0] -eq 0xFEFF) { $raw = $raw.Substring(1) }
+  return $raw
+}
+
+# Strict YAML frontmatter parser (BOM-tolerant, tracks current list key)
+function Parse-Frontmatter([string]$FilePath) {
+  $raw = Read-Utf8 $FilePath
   $result = @{}
-  $currentListKey = $null  # Track which key is currently receiving list items
-  
-  # Match YAML frontmatter between --- markers
-  if ($content -match '(?ms)^---\r?\n(.*?)\r?\n---') {
-    $yaml = $Matches[1]
-    
-    foreach ($line in ($yaml -split "`r?`n")) {
-      # Skip empty lines and comments
-      if ([string]::IsNullOrWhiteSpace($line) -or $line -match '^\s*#') {
-        continue
-      }
-      
-      # Check for key: value pattern
-      if ($line -match '^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$') {
-        $key = $Matches[1].Trim().ToLower()
-        $value = $Matches[2].Trim()
-        
-        # Handle inline arrays [item1, item2]
-        if ($value -match '^\[(.*)\]$') {
-          $items = @()
-          $innerContent = $Matches[1]
-          if (-not [string]::IsNullOrWhiteSpace($innerContent)) {
-            $items = $innerContent -split ',' | ForEach-Object { $_.Trim() }
-          }
-          $result[$key] = $items
-          $currentListKey = $null  # Inline array is complete
-        }
-        # Empty value - might be start of multi-line array
-        elseif ([string]::IsNullOrWhiteSpace($value)) {
-          $result[$key] = @()
-          $currentListKey = $key  # This key will receive list items
-        }
-        # Simple scalar value
-        else {
-          $result[$key] = $value
-          $currentListKey = $null
-        }
-      }
-      # Check for list item (- value)
-      elseif ($line -match '^\s+-\s+(.+)$') {
-        $itemValue = $Matches[1].Trim()
-        if ($currentListKey -and $result.ContainsKey($currentListKey)) {
-          $result[$currentListKey] += $itemValue
-        }
-      }
+  $lines = $raw -split "`r?`n"
+
+  if ($lines.Count -lt 3 -or $lines[0].Trim() -ne "---") { return $null }
+
+  $i = 1
+  $currentListKey = $null
+  while ($i -lt $lines.Count) {
+    $line = $lines[$i]
+    if ($line.Trim() -eq "---") { break }
+
+    # ignore comments/blank
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) { $i++; continue }
+
+    # list item
+    if ($line -match '^\s*-\s+(.+)$' -and $currentListKey) {
+      if (-not ($result.ContainsKey($currentListKey))) { $result[$currentListKey] = @() }
+      $result[$currentListKey] += $Matches[1].Trim()
+      $i++; continue
     }
+
+    # key: value
+    if ($line -match '^\s*([A-Za-z0-9_]+)\s*:\s*(.*)\s*$') {
+      $key = $Matches[1].Trim().ToLower()
+      $val = $Matches[2]
+
+      # key: (empty, start of list)
+      if ([string]::IsNullOrWhiteSpace($val)) {
+        $result[$key] = @()
+        $currentListKey = $key
+        $i++; continue
+      }
+
+      $currentListKey = $null
+      $v = $val.Trim()
+
+      # strip quotes
+      if (($v.StartsWith('"') -and $v.EndsWith('"')) -or ($v.StartsWith("'") -and $v.EndsWith("'"))) {
+        $v = $v.Substring(1, $v.Length-2)
+      }
+
+      # inline array: [a, b]
+      if ($v -match '^\[(.*)\]$') {
+        $inner = $Matches[1]
+        if ([string]::IsNullOrWhiteSpace($inner)) {
+          $result[$key] = @()
+        } else {
+          $items = $inner -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+          $result[$key] = @($items)
+        }
+      } else {
+        $result[$key] = $v
+      }
+
+      $i++; continue
+    }
+
+    # unknown line -> skip
+    $i++
   }
+
   return $result
 }
 
@@ -607,59 +612,74 @@ $DigestsDir = Join-Path $MemoryDir "digests"
 
 if (!(Test-Path $LessonsDir)) { New-Item -ItemType Directory -Force -Path $LessonsDir | Out-Null }
 if (!(Test-Path $JournalDir)) { throw "Missing: $JournalDir" }
+if (!(Test-Path $DigestsDir)) { New-Item -ItemType Directory -Force -Path $DigestsDir | Out-Null }
 
-# Parse lessons from individual files with YAML frontmatter
+# Lessons -> index.md + lessons-index.json
 $lessonFiles = Get-ChildItem -Path $LessonsDir -File -Filter "L-*.md" -ErrorAction SilentlyContinue | Sort-Object Name
-
 $lessons = @()
+
 foreach ($lf in $lessonFiles) {
-  $yaml = Parse-YamlFrontmatter $lf.FullName
-  
-  if ($yaml.id) {
-    $num = 0
-    if ($yaml.id -match 'L-(\d+)') { $num = [int]$Matches[1] }
-    
-    $lessons += [pscustomobject]@{
-      Id = $yaml.id
-      Num = $num
-      Title = if ($yaml.title) { $yaml.title } else { $lf.BaseName }
-      Status = if ($yaml.status) { $yaml.status } else { "Active" }
-      Introduced = if ($yaml.introduced) { $yaml.introduced } else { "" }
-      Tags = if ($yaml.tags) { @($yaml.tags) } else { @() }
-      AppliesTo = if ($yaml.applies_to) { @($yaml.applies_to) } else { @() }
-      Rule = if ($yaml.rule) { $yaml.rule } else { $yaml.title }
-      File = $lf.Name
-    }
+  $yaml = Parse-Frontmatter $lf.FullName
+  if ($null -eq $yaml) { continue }
+  if (-not $yaml.ContainsKey("id")) { continue }
+
+  $id = [string]$yaml["id"]
+  $num = 0
+  if ($id -match 'L-(\d+)') { $num = [int]$Matches[1] }
+
+  $title = if ($yaml.ContainsKey("title")) { [string]$yaml["title"] } else { $lf.BaseName }
+  $status = if ($yaml.ContainsKey("status")) { [string]$yaml["status"] } else { "Active" }
+  $introduced = if ($yaml.ContainsKey("introduced")) { [string]$yaml["introduced"] } else { "" }
+
+  $tags = @()
+  if ($yaml.ContainsKey("tags")) { $tags = @($yaml["tags"]) }
+
+  $applies = @()
+  if ($yaml.ContainsKey("applies_to")) { $applies = @($yaml["applies_to"]) }
+
+  $rule = ""
+  if ($yaml.ContainsKey("rule")) { $rule = [string]$yaml["rule"] } else { $rule = $title }
+
+  $lessons += [pscustomobject]@{
+    Id = $id
+    Num = $num
+    Title = $title
+    Status = $status
+    Introduced = $introduced
+    Tags = $tags
+    AppliesTo = $applies
+    Rule = $rule
+    File = $lf.Name
   }
 }
 
 $lessons = $lessons | Sort-Object Num
 
-# Write lessons index
 $gen = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
-$lines = @()
-$lines += "# Lessons Index (generated)"
-$lines += ""
-$lines += "Generated: $gen"
-$lines += ""
-$lines += "Format: ID | [Tags] | AppliesTo | Rule | File"
-$lines += ""
-foreach ($l in $lessons) {
-  $tagText = ($l.Tags | ForEach-Object { "[$_]" }) -join ""
-  $appliesText = "(any)"
-  if ($l.AppliesTo -and @($l.AppliesTo).Count -gt 0) { $appliesText = ($l.AppliesTo -join ", ") }
-  $lines += "$($l.Id) | $tagText | $appliesText | $($l.Rule) | ``$($l.File)``"
-}
+$idx = @()
+$idx += "# Lessons Index (generated)"
+$idx += ""
+$idx += "Generated: $gen"
+$idx += ""
+$idx += "Format: ID | [Tags] | AppliesTo | Rule | File"
+$idx += ""
 
 if (-not $lessons -or @($lessons).Count -eq 0) {
-  $lines += "(No lessons yet. Create your first lesson: lessons/L-001-title.md)"
+  $idx += "(No lessons yet.)"
+} else {
+  foreach ($l in $lessons) {
+    $tagText = ($l.Tags | ForEach-Object { "[$_]" }) -join ""
+    $appliesText = "(any)"
+    if ($l.AppliesTo -and @($l.AppliesTo).Count -gt 0) { $appliesText = ($l.AppliesTo -join ", ") }
+    $idx += "$($l.Id) | $tagText | $appliesText | $($l.Rule) | ``$($l.File)``"
+  }
 }
 
-Write-Utf8NoBom (Join-Path $LessonsDir "index.md") ($lines -join "`n")
+Write-Utf8NoBom (Join-Path $LessonsDir "index.md") ($idx -join "`n")
 $lessonsJson = if (-not $lessons -or @($lessons).Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject @($lessons) -Depth 6 }
 Write-Utf8NoBom (Join-Path $MemoryDir "lessons-index.json") $lessonsJson
 
-# Parse journal months
+# Journal -> journal-index.md + journal-index.json + digests
 $journalFiles = Get-ChildItem -Path $JournalDir -File | Where-Object {
   $_.Name -match '^\d{4}-\d{2}\.md$' -and $_.Name -ne 'README.md'
 } | Sort-Object Name
@@ -667,7 +687,7 @@ $journalFiles = Get-ChildItem -Path $JournalDir -File | Where-Object {
 $journalEntries = New-Object System.Collections.Generic.List[object]
 
 foreach ($jf in $journalFiles) {
-  $text = Get-Content -Raw -Encoding UTF8 $jf.FullName
+  $text = Read-Utf8 $jf.FullName
 
   $datePattern = '(?m)^##\s+(\d{4}-\d{2}-\d{2}).*$'
   $dateMatches = [regex]::Matches($text, $datePattern)
@@ -678,7 +698,6 @@ foreach ($jf in $journalFiles) {
     $end = if ($i -lt $dateMatches.Count - 1) { $dateMatches[$i+1].Index } else { $text.Length }
     $block = $text.Substring($start, $end - $start)
 
-    # Top-level entries start with "- ["
     $entryPattern = '(?m)^-\s+(\[[^\]]+\]){1,}.*$'
     $entryMatches = [regex]::Matches($block, $entryPattern)
 
@@ -694,11 +713,10 @@ foreach ($jf in $journalFiles) {
 
       $title = ($firstLine -replace '^-\s+(\[[^\]]+\])+\s*', '').Trim()
 
-      # Extract file-like backtick refs in this entry block
       $files = @()
       foreach ($fm in [regex]::Matches($eBlock, '`([^`]+)`')) {
         $v = $fm.Groups[1].Value.Trim()
-        if ($v -match '[/\\]' -or $v -match '\.cs$|\.mdx$|\.md$|\.yml$|\.csproj$|\.ps1$|\.ts$|\.tsx$|\.json$') {
+        if ($v -match '[/\\]' -or $v -match '\.(cs|md|mdx|yml|yaml|csproj|ps1|ts|tsx|json|py)$') {
           $files += $v
         }
       }
@@ -713,9 +731,35 @@ foreach ($jf in $journalFiles) {
       })
     }
   }
+
+  # digest for this month
+  $monthName = [System.IO.Path]::GetFileNameWithoutExtension($jf.Name)
+  $digestPath = Join-Path $DigestsDir "$monthName.digest.md"
+
+  $digest = @()
+  $digest += "# Monthly Digest - $monthName (generated)"
+  $digest += ""
+  $digest += "Generated: $gen"
+  $digest += ""
+  $digest += "Token-cheap summary. See ``.cursor/memory/journal/$($jf.Name)`` for details."
+  $digest += ""
+
+  $dates = [regex]::Matches($text, '(?m)^##\s+(\d{4}-\d{2}-\d{2}).*$') | ForEach-Object { $_.Groups[1].Value }
+  $uniqueDates = $dates | Select-Object -Unique
+  foreach ($d in $uniqueDates) {
+    $digest += "## $d"
+    $digest += ""
+    $entriesForDay = $journalEntries | Where-Object { $_.MonthFile -eq $jf.Name -and $_.Date -eq $d }
+    foreach ($e in $entriesForDay) {
+      $tagText = ($e.Tags | ForEach-Object { "[$_]" }) -join ""
+      $digest += "- $tagText $($e.Title)"
+    }
+    $digest += ""
+  }
+
+  Write-Utf8NoBom $digestPath ($digest -join "`n")
 }
 
-# Write journal index
 $ji = @()
 $ji += "# Journal Index (generated)"
 $ji += ""
@@ -735,50 +779,19 @@ Write-Utf8NoBom (Join-Path $MemoryDir "journal-index.md") ($ji -join "`n")
 $journalJson = if (-not $journalEntries -or $journalEntries.Count -eq 0) { "[]" } else { ConvertTo-Json -InputObject @($journalEntries.ToArray()) -Depth 6 }
 Write-Utf8NoBom (Join-Path $MemoryDir "journal-index.json") $journalJson
 
-# Generate digests per month
-foreach ($jf in $journalFiles) {
-  $monthName = [System.IO.Path]::GetFileNameWithoutExtension($jf.Name)
-  $digestPath = Join-Path $DigestsDir "$monthName.digest.md"
-  $text = Get-Content -Raw -Encoding UTF8 $jf.FullName
-
-  $digest = @()
-  $digest += "# Monthly Digest - $monthName (generated)"
-  $digest += ""
-  $digest += "Generated: $gen"
-  $digest += ""
-  $digest += "This is a token-cheap summary. See ``.cursor/memory/journal/$($jf.Name)`` for details."
-  $digest += ""
-
-  $dates = [regex]::Matches($text, '(?m)^##\s+(\d{4}-\d{2}-\d{2}).*$') | ForEach-Object { $_.Groups[1].Value }
-  $uniqueDates = $dates | Select-Object -Unique
-
-  foreach ($d in $uniqueDates) {
-    $digest += "## $d"
-    $digest += ""
-    $entriesForDay = $journalEntries | Where-Object { $_.MonthFile -eq $jf.Name -and $_.Date -eq $d }
-    foreach ($e in $entriesForDay) {
-      $tagText = ($e.Tags | ForEach-Object { "[$_]" }) -join ""
-      $digest += "- $tagText $($e.Title)"
-    }
-    $digest += ""
-  }
-
-  Write-Utf8NoBom $digestPath ($digest -join "`n")
-}
-
 # Optional: build SQLite index if Python exists
 $python = Get-Command python -ErrorAction SilentlyContinue
 if ($null -ne $python) {
   $pyScript = Join-Path $RepoRoot "scripts\memory\build-memory-sqlite.py"
   if (Test-Path $pyScript) {
-    Write-Host "Python detected; building SQLite index..." -ForegroundColor Cyan
+    Write-Host "Python detected; building SQLite FTS index..." -ForegroundColor Cyan
     & $python.Source $pyScript --repo $RepoRoot | Out-Host
   }
 } else {
-  Write-Host "Python not found; skipping SQLite index build." -ForegroundColor DarkYellow
+  Write-Host "Python not found; skipping SQLite build." -ForegroundColor DarkYellow
 }
 
-# Token usage monitoring for "always read" layer
+# Token usage monitoring
 $hotFiles = @(
   (Join-Path $MemoryDir "hot-rules.md"),
   (Join-Path $MemoryDir "active-context.md"),
@@ -787,42 +800,293 @@ $hotFiles = @(
 $totalChars = 0
 foreach ($hf in $hotFiles) {
   if (Test-Path $hf) {
-    $totalChars += (Get-Content $hf -Raw -ErrorAction SilentlyContinue).Length
+    $t = Get-Content -Raw -ErrorAction SilentlyContinue $hf
+    if ($t) { $totalChars += $t.Length }
   }
 }
 
-# Rough estimate: 4 chars ≈ 1 token
 $estimatedTokens = [math]::Round($totalChars / 4)
 
 Write-Host ""
 if ($totalChars -gt 8000) {
   Write-Host "WARNING: Always-read layer is $totalChars chars (~$estimatedTokens tokens)" -ForegroundColor Yellow
-  Write-Host "  Consider moving content from memo.md to lessons, or clearing active-context.md" -ForegroundColor Yellow
 } else {
   Write-Host "Always-read layer: $totalChars chars (~$estimatedTokens tokens) - Healthy" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "Done. Generated indexes + digests." -ForegroundColor Green
+Write-Host "Rebuild complete." -ForegroundColor Green
+'@
+
+$linter = @'
+<#
+lint-memory.ps1
+Validates memory health:
+- lesson YAML frontmatter required fields
+- unique lesson IDs
+- tags must exist in tag-vocabulary.md
+- journal date headings should not repeat within a month file
+- token budget check
+#>
+
+[CmdletBinding()]
+param([string]$RepoRoot = "")
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
+  if ($PSScriptRoot) {
+    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+  } else {
+    $RepoRoot = (Get-Location).Path
+  }
+}
+
+$mem = Join-Path $RepoRoot ".cursor\memory"
+$lessonsDir = Join-Path $mem "lessons"
+$journalDir = Join-Path $mem "journal"
+$tagVocabPath = Join-Path $mem "tag-vocabulary.md"
+
+$errors = @()
+$warnings = @()
+
+function Fail([string]$msg) {
+  $script:errors += $msg
+}
+
+function Warn([string]$msg) {
+  $script:warnings += $msg
+}
+
+function ReadText([string]$p) {
+  $t = Get-Content -Raw -Encoding UTF8 -ErrorAction Stop $p
+  if ($t.Length -gt 0 -and [int]$t[0] -eq 0xFEFF) { $t = $t.Substring(1) } # strip BOM
+  return $t
+}
+
+Write-Host "Linting Cursor Memory System..." -ForegroundColor Cyan
+Write-Host ""
+
+# Load allowed tags from tag-vocabulary.md
+$allowed = @{}
+if (Test-Path $tagVocabPath) {
+  $tv = ReadText $tagVocabPath
+  foreach ($m in [regex]::Matches($tv, '(?m)^\-\s+\[([^\]]+)\]')) {
+    $allowed[$m.Groups[1].Value.Trim()] = $true
+  }
+} else {
+  Warn "Missing tag vocabulary: $tagVocabPath"
+}
+
+Write-Host "Checking lessons..." -ForegroundColor White
+
+# Minimal YAML frontmatter parse
+function ParseFrontmatter([string]$file) {
+  $raw = ReadText $file
+  $lines = $raw -split "`r?`n"
+  if ($lines.Count -lt 3 -or $lines[0].Trim() -ne "---") { return $null }
+
+  $result = @{}
+  $i = 1
+  $currentListKey = $null
+  while ($i -lt $lines.Count) {
+    $line = $lines[$i]
+    if ($line.Trim() -eq "---") { break }
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) { $i++; continue }
+
+    if ($line -match '^\s*-\s+(.+)$' -and $currentListKey) {
+      $result[$currentListKey] += @($Matches[1].Trim())
+      $i++; continue
+    }
+
+    if ($line -match '^\s*([A-Za-z0-9_]+)\s*:\s*(.*)\s*$') {
+      $key = $Matches[1].Trim().ToLower()
+      $val = $Matches[2]
+      if ([string]::IsNullOrWhiteSpace($val)) {
+        $result[$key] = @()
+        $currentListKey = $key
+        $i++; continue
+      }
+      $currentListKey = $null
+      $v = $val.Trim()
+      if (($v.StartsWith('"') -and $v.EndsWith('"')) -or ($v.StartsWith("'") -and $v.EndsWith("'"))) {
+        $v = $v.Substring(1, $v.Length-2)
+      }
+      if ($v -match '^\[(.*)\]$') {
+        $inner = $Matches[1]
+        $items = @()
+        if (-not [string]::IsNullOrWhiteSpace($inner)) {
+          $items = $inner -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        }
+        $result[$key] = @($items)
+      } else {
+        $result[$key] = $v
+      }
+      $i++; continue
+    }
+
+    $i++
+  }
+
+  return $result
+}
+
+# Validate lessons
+$ids = @{}
+$lessonFiles = Get-ChildItem -Path $lessonsDir -File -Filter "L-*.md" -ErrorAction SilentlyContinue
+$lessonCount = if ($lessonFiles) { @($lessonFiles).Count } else { 0 }
+
+foreach ($lf in $lessonFiles) {
+  $yaml = ParseFrontmatter $lf.FullName
+  if ($null -eq $yaml) {
+    Fail "[$($lf.Name)] Missing YAML frontmatter"
+    continue
+  }
+
+  foreach ($req in @("id","title","status","tags","introduced","rule")) {
+    if (-not $yaml.ContainsKey($req) -or [string]::IsNullOrWhiteSpace([string]$yaml[$req])) {
+      Fail "[$($lf.Name)] Missing required field: $req"
+    }
+  }
+
+  $id = [string]$yaml["id"]
+  if ($id -notmatch '^L-\d{3}$') { Warn "[$($lf.Name)] ID '$id' doesn't match format L-XXX (3 digits)" }
+
+  if ($ids.ContainsKey($id)) { Fail "[$($lf.Name)] Duplicate lesson ID $id (also in $($ids[$id]))" }
+  else { $ids[$id] = $lf.Name }
+
+  # tags must be allowed
+  $tags = @($yaml["tags"])
+  foreach ($t in $tags) {
+    $tag = [string]$t
+    if ($allowed.Count -gt 0 -and -not $allowed.ContainsKey($tag)) {
+      Fail "[$($lf.Name)] Unknown tag [$tag]. Add it to tag-vocabulary.md or fix the lesson."
+    }
+  }
+
+  # Check filename matches ID
+  $expectedPrefix = $id.ToLower()
+  if (-not $lf.Name.ToLower().StartsWith($expectedPrefix)) {
+    Warn "[$($lf.Name)] Filename doesn't start with ID '$id'"
+  }
+}
+
+Write-Host "  Found $lessonCount lesson files" -ForegroundColor Gray
+
+# Validate journal: duplicate date headings per month file
+Write-Host "Checking journals..." -ForegroundColor White
+
+$journalFiles = Get-ChildItem -Path $journalDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{4}-\d{2}\.md$' }
+$journalCount = if ($journalFiles) { @($journalFiles).Count } else { 0 }
+
+foreach ($jf in $journalFiles) {
+  $txt = ReadText $jf.FullName
+  $dates = @([regex]::Matches($txt, '(?m)^##\s+(\d{4}-\d{2}-\d{2})') | ForEach-Object { $_.Groups[1].Value })
+  if ($dates -and $dates.Count -gt 0) {
+    $g = $dates | Group-Object | Where-Object { $_.Count -gt 1 }
+    foreach ($dup in $g) {
+      Fail "[$($jf.Name)] Duplicate date heading $($dup.Name) x$($dup.Count). Merge into one section."
+    }
+  }
+}
+
+Write-Host "  Found $journalCount journal files" -ForegroundColor Gray
+
+# Token budget check
+Write-Host "Checking token budget..." -ForegroundColor White
+
+$hotFiles = @(
+  (Join-Path $mem "hot-rules.md"),
+  (Join-Path $mem "active-context.md"),
+  (Join-Path $mem "memo.md")
+)
+
+$totalChars = 0
+foreach ($hf in $hotFiles) {
+  if (Test-Path $hf) {
+    $chars = (Get-Content $hf -Raw -ErrorAction SilentlyContinue).Length
+    $totalChars += $chars
+    if ($chars -gt 3000) {
+      Warn "[$(Split-Path $hf -Leaf)] File is $chars chars (~$([math]::Round($chars/4)) tokens) - consider trimming"
+    }
+  }
+}
+
+$estimatedTokens = [math]::Round($totalChars / 4)
+Write-Host "  Always-read layer: $totalChars chars (~$estimatedTokens tokens)" -ForegroundColor Gray
+
+if ($totalChars -gt 8000) {
+  Fail "[Token Budget] Always-read layer exceeds 8000 chars (~2000 tokens)"
+} elseif ($totalChars -gt 6000) {
+  Warn "[Token Budget] Always-read layer is $totalChars chars - approaching limit"
+}
+
+# Check for missing indexes
+Write-Host "Checking for orphans..." -ForegroundColor White
+
+if (-not (Test-Path (Join-Path $lessonsDir "index.md"))) {
+  Warn "[lessons/index.md] Missing - run rebuild-memory-index.ps1"
+}
+if (-not (Test-Path (Join-Path $mem "journal-index.md"))) {
+  Warn "[journal-index.md] Missing - run rebuild-memory-index.ps1"
+}
+
+# Report
+Write-Host ""
+Write-Host "====== LINT RESULTS ======" -ForegroundColor White
+
+$errorCount = @($errors).Count
+$warningCount = @($warnings).Count
+
+if ($errorCount -eq 0 -and $warningCount -eq 0) {
+  Write-Host "All checks passed!" -ForegroundColor Green
+} else {
+  if ($errorCount -gt 0) {
+    Write-Host ""
+    Write-Host "ERRORS ($errorCount):" -ForegroundColor Red
+    foreach ($e in $errors) {
+      Write-Host "  ERROR: $e" -ForegroundColor Red
+    }
+  }
+  if ($warningCount -gt 0) {
+    Write-Host ""
+    Write-Host "WARNINGS ($warningCount):" -ForegroundColor Yellow
+    foreach ($w in $warnings) {
+      Write-Host "  WARN: $w" -ForegroundColor Yellow
+    }
+  }
+}
+
+Write-Host ""
+
+if ($errorCount -gt 0) {
+  Write-Host "Lint FAILED with $errorCount error(s)" -ForegroundColor Red
+  exit 1
+} else {
+  Write-Host "Lint passed" -ForegroundColor Green
+  exit 0
+}
 '@
 
 $queryScript = @'
 <#
 query-memory.ps1
-Quick search across the memory system.
-Uses SQLite FTS if available, falls back to Select-String.
+Search memory quickly.
 
-USAGE:
-  powershell -File .\scripts\memory\query-memory.ps1 -Query "LayoutService"
-  powershell -File .\scripts\memory\query-memory.ps1 -Query "IL2CPP" -Area Lessons
-  powershell -File .\scripts\memory\query-memory.ps1 -Query "auth" -Format AI
-  powershell -File .\scripts\memory\query-memory.ps1 -Query "render" -UseSqlite
+Default: grep (Select-String)
+Optional: SQLite FTS (requires python + memory.sqlite), via -UseSqlite
+
+Examples:
+  powershell -File scripts/memory/query-memory.ps1 -Query "IL2CPP"
+  powershell -File scripts/memory/query-memory.ps1 -Query "IL2CPP" -UseSqlite
+  powershell -File scripts/memory/query-memory.ps1 -Query "bind" -Format AI
 #>
 
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][string]$Query,
-  [ValidateSet("All","HotRules","Memo","Lessons","Journal","Digests")][string]$Area = "All",
+  [ValidateSet("All","HotRules","Active","Memo","Lessons","Journal","Digests")][string]$Area = "All",
   [ValidateSet("Human","AI")][string]$Format = "Human",
   [switch]$UseSqlite
 )
@@ -837,191 +1101,77 @@ if ($PSScriptRoot) {
 }
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $LessonsDir = Join-Path $MemoryDir "lessons"
-$SqliteDb = Join-Path $MemoryDir "memory.sqlite"
+$SqlitePath = Join-Path $MemoryDir "memory.sqlite"
 
-# Check if we should use SQLite
-$useSqliteSearch = $false
-if ($UseSqlite -or (Test-Path $SqliteDb)) {
-  # Check if Python is available for SQLite queries
+# If SQLite mode requested, use python helper if possible.
+if ($UseSqlite) {
   $python = Get-Command python -ErrorAction SilentlyContinue
-  if ($python) {
-    $useSqliteSearch = $true
+  $py = Join-Path $RepoRoot "scripts\memory\query-memory-sqlite.py"
+  if ($null -ne $python -and (Test-Path $SqlitePath) -and (Test-Path $py)) {
+    Write-Host "Using SQLite FTS search..." -ForegroundColor Cyan
+    & $python.Source $py --repo $RepoRoot --q $Query --area $Area --format $Format
+    exit $LASTEXITCODE
+  }
+  Write-Host "SQLite mode unavailable (need python + memory.sqlite + query-memory-sqlite.py). Falling back to grep." -ForegroundColor DarkYellow
+}
+
+Write-Host "Using file-based search..." -ForegroundColor Cyan
+
+$targets = @()
+switch ($Area) {
+  "HotRules" { $targets += (Join-Path $MemoryDir "hot-rules.md") }
+  "Active"   { $targets += (Join-Path $MemoryDir "active-context.md") }
+  "Memo"     { $targets += (Join-Path $MemoryDir "memo.md") }
+  "Lessons"  {
+    $targets += (Join-Path $LessonsDir "index.md")
+    $lessonFiles = Get-ChildItem -Path $LessonsDir -Filter "L-*.md" -ErrorAction SilentlyContinue
+    foreach ($lf in $lessonFiles) { $targets += $lf.FullName }
+  }
+  "Journal"  { $targets += (Join-Path $MemoryDir "journal-index.md") }
+  "Digests"  { $targets += (Join-Path $MemoryDir "digests\*.digest.md") }
+  "All" {
+    $targets += (Join-Path $MemoryDir "hot-rules.md")
+    $targets += (Join-Path $MemoryDir "active-context.md")
+    $targets += (Join-Path $MemoryDir "memo.md")
+    $targets += (Join-Path $LessonsDir "index.md")
+    $targets += (Join-Path $MemoryDir "journal-index.md")
+    $targets += (Join-Path $MemoryDir "digests\*.digest.md")
   }
 }
 
-if ($useSqliteSearch) {
-  # Use SQLite FTS for search
-  Write-Host "Using SQLite FTS search..." -ForegroundColor Cyan
-  
-  $pythonScript = @"
-import sqlite3
-import sys
+$allMatches = @()
+foreach ($t in $targets) {
+  $results = Select-String -Path $t -Pattern $Query -SimpleMatch -ErrorAction SilentlyContinue
+  if ($results) { $allMatches += $results }
+}
 
-db_path = sys.argv[1]
-query = sys.argv[2]
-area = sys.argv[3]
-format_type = sys.argv[4]
+$matchCount = @($allMatches).Count
 
-conn = sqlite3.connect(db_path)
-cursor = conn.cursor()
-
-# Build WHERE clause based on area
-area_filter = ""
-if area == "HotRules":
-    area_filter = "AND kind = 'hot_rules'"
-elif area == "Memo":
-    area_filter = "AND kind = 'memo'"
-elif area == "Lessons":
-    area_filter = "AND kind = 'lesson'"
-elif area == "Journal":
-    area_filter = "AND kind = 'journal'"
-
-# FTS5 search
-sql = f'''
-SELECT kind, id, title, path, 
-       snippet(memory_fts, 5, '>>>', '<<<', '...', 32) as snippet
-FROM memory_fts 
-WHERE memory_fts MATCH ? {area_filter}
-ORDER BY rank
-LIMIT 20
-'''
-
-try:
-    cursor.execute(sql, (query,))
-    results = cursor.fetchall()
-    
-    if format_type == "AI":
-        if results:
-            print(f"Found {len(results)} matches. Files to read:")
-            seen_paths = set()
-            for row in results:
-                path = row[3]
-                if path not in seen_paths:
-                    seen_paths.add(path)
-                    # Make path relative - handle Windows paths
-                    path_normalized = path.replace('\\', '/')
-                    if '.cursor/' in path_normalized:
-                        rel_path = '.cursor/' + path_normalized.split('.cursor/')[-1]
-                        print(f"  @{rel_path}")
-                    else:
-                        print(f"  @{path}")
-        else:
-            print(f"No matches found for: {query}")
-    else:
-        if results:
-            print(f"Found {len(results)} matches for '{query}':")
-            print()
-            for row in results:
-                kind, id_val, title, path, snippet = row
-                print(f"[{kind}] {title or id_val}")
-                print(f"  Path: {path}")
-                if snippet:
-                    print(f"  Match: {snippet}")
-                print()
-        else:
-            print(f"No matches found for: {query}")
-            
-except sqlite3.OperationalError as e:
-    # FTS syntax error - try simple LIKE search
-    sql = f'''
-    SELECT kind, id, title, path, content
-    FROM memory_fts 
-    WHERE content LIKE ? {area_filter}
-    LIMIT 20
-    '''
-    cursor.execute(sql, (f'%{query}%',))
-    results = cursor.fetchall()
-    
-    if format_type == "AI":
-        if results:
-            print(f"Found {len(results)} matches. Files to read:")
-            seen_paths = set()
-            for row in results:
-                path = row[3]
-                if path not in seen_paths:
-                    seen_paths.add(path)
-                    print(f"  @{path}")
-        else:
-            print(f"No matches found for: {query}")
-    else:
-        if results:
-            for row in results:
-                kind, id_val, title, path, content = row
-                print(f"[{kind}] {title or id_val}: {path}")
-        else:
-            print(f"No matches found for: {query}")
-
-conn.close()
-"@
-
-  # Run Python script
-  $pythonScript | & $python.Source - $SqliteDb $Query $Area $Format
-  
-} else {
-  # Fallback to Select-String search
-  Write-Host "Using file-based search (SQLite not available)..." -ForegroundColor DarkYellow
-  
-  $targets = @()
-  switch ($Area) {
-    "HotRules" { $targets += (Join-Path $MemoryDir "hot-rules.md") }
-    "Memo"     { $targets += (Join-Path $MemoryDir "memo.md") }
-    "Lessons"  { 
-      $targets += (Join-Path $LessonsDir "index.md")
-      $lessonFiles = Get-ChildItem -Path $LessonsDir -Filter "L-*.md" -ErrorAction SilentlyContinue
-      foreach ($lf in $lessonFiles) { $targets += $lf.FullName }
-    }
-    "Journal"  { $targets += (Join-Path $MemoryDir "journal-index.md") }
-    "Digests"  { $targets += (Join-Path $MemoryDir "digests\*.digest.md") }
-    "All" {
-      $targets += (Join-Path $MemoryDir "hot-rules.md")
-      $targets += (Join-Path $MemoryDir "active-context.md")
-      $targets += (Join-Path $MemoryDir "memo.md")
-      $targets += (Join-Path $LessonsDir "index.md")
-      $targets += (Join-Path $MemoryDir "journal-index.md")
-      $targets += (Join-Path $MemoryDir "digests\*.digest.md")
-    }
-  }
-
-  $allMatches = @()
-
-  foreach ($t in $targets) {
-    $results = Select-String -Path $t -Pattern $Query -SimpleMatch -ErrorAction SilentlyContinue
-    if ($results) {
-      foreach ($r in $results) {
-        $allMatches += $r
-      }
-    }
-  }
-
-  if ($Format -eq "AI") {
-    $matchCount = if ($allMatches) { @($allMatches).Count } else { 0 }
-    if ($matchCount -eq 0) {
-      Write-Host "No matches found for: $Query"
-    } else {
-      Write-Host "Found $matchCount matches. Files to read:"
-      $uniqueFiles = $allMatches | ForEach-Object { $_.Path } | Sort-Object -Unique
-      foreach ($f in $uniqueFiles) {
-        $relative = $f.Replace($RepoRoot, "").TrimStart("\", "/")
-        Write-Host "  @$relative"
-      }
-    }
+if ($Format -eq "AI") {
+  if ($matchCount -eq 0) {
+    Write-Host "No matches found for: $Query"
   } else {
-    Write-Host "Searching: $Query" -ForegroundColor Cyan
-    Write-Host "Area: $Area" -ForegroundColor Cyan
-    Write-Host ""
-
-    $matchCount = if ($allMatches) { @($allMatches).Count } else { 0 }
-    if ($matchCount -eq 0) {
-      Write-Host "No matches found." -ForegroundColor Yellow
-    } else {
-      $grouped = $allMatches | Group-Object Path
-      foreach ($g in $grouped) {
-        Write-Host "==> $($g.Name)" -ForegroundColor Green
-        foreach ($m in $g.Group) {
-          Write-Host "  $($m.LineNumber): $($m.Line.Trim())"
-        }
-        Write-Host ""
+    $uniqueFiles = $allMatches | ForEach-Object { $_.Path } | Sort-Object -Unique
+    Write-Host "Files to read:"
+    foreach ($f in $uniqueFiles) {
+      $relative = $f.Replace($RepoRoot, "").TrimStart("\", "/")
+      Write-Host "  @$relative"
+    }
+  }
+} else {
+  Write-Host "Searching: $Query" -ForegroundColor Cyan
+  Write-Host "Area: $Area" -ForegroundColor Cyan
+  Write-Host ""
+  if ($matchCount -eq 0) {
+    Write-Host "No matches found." -ForegroundColor Yellow
+  } else {
+    $grouped = $allMatches | Group-Object Path
+    foreach ($g in $grouped) {
+      Write-Host "==> $($g.Name)" -ForegroundColor Green
+      foreach ($m in $g.Group) {
+        Write-Host "  $($m.LineNumber): $($m.Line.Trim())"
       }
+      Write-Host ""
     }
   }
 }
@@ -1029,13 +1179,13 @@ conn.close()
 
 $buildSqlitePy = @'
 #!/usr/bin/env python3
+"""Build SQLite FTS5 index from memory JSON indexes."""
 import argparse
 import json
 import sqlite3
 from pathlib import Path
 
 def read_text(p: Path) -> str:
-    # tolerate BOM
     return p.read_text(encoding="utf-8-sig", errors="replace")
 
 def main():
@@ -1045,163 +1195,176 @@ def main():
 
     repo = Path(args.repo)
     mem = repo / ".cursor" / "memory"
-    lessons_dir = mem / "lessons"
     out_db = mem / "memory.sqlite"
 
     lessons_index = mem / "lessons-index.json"
     journal_index = mem / "journal-index.json"
 
-    if not journal_index.exists():
-        print("Missing journal-index.json. Run rebuild-memory-index.ps1 first.")
-        return 2
-
-    # Load lessons from JSON index
     lessons = []
     if lessons_index.exists():
-        lessons_text = read_text(lessons_index).strip()
-        if lessons_text:
-            lessons = json.loads(lessons_text)
+        t = read_text(lessons_index).strip()
+        if t:
+            lessons = json.loads(t)
             if not isinstance(lessons, list):
                 lessons = [lessons] if lessons else []
 
-    # Load journal from JSON index
-    journal_text = read_text(journal_index).strip()
-    journal = json.loads(journal_text) if journal_text else []
-    if not isinstance(journal, list):
-        journal = [journal] if journal else []
+    journal = []
+    if journal_index.exists():
+        t = read_text(journal_index).strip()
+        if t:
+            journal = json.loads(t)
+            if not isinstance(journal, list):
+                journal = [journal] if journal else []
 
     if out_db.exists():
         out_db.unlink()
 
     con = sqlite3.connect(str(out_db))
     cur = con.cursor()
-
-    # FTS for fast local search over memory
     cur.execute("CREATE VIRTUAL TABLE memory_fts USING fts5(kind, id, date, tags, title, content, path);")
 
-    # Insert memo + hot rules as single docs
-    hot = mem / "hot-rules.md"
-    memo = mem / "memo.md"
-    if hot.exists():
-        cur.execute("INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
-                    ("hot_rules","HOT",None,"","Hot Rules",read_text(hot),str(hot)))
-    if memo.exists():
-        cur.execute("INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
-                    ("memo","MEMO",None,"","Memo",read_text(memo),str(memo)))
+    # Always-read docs
+    for kind, fid, path in [
+        ("hot_rules", "HOT", mem / "hot-rules.md"),
+        ("active", "ACTIVE", mem / "active-context.md"),
+        ("memo", "MEMO", mem / "memo.md"),
+    ]:
+        if path.exists():
+            cur.execute(
+                "INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
+                (kind, fid, None, "", path.name, read_text(path), str(path)),
+            )
 
-    # Lessons (now from individual files)
+    # Lessons: insert full file content if possible
+    lessons_dir = mem / "lessons"
     for l in lessons:
+        lid = l.get("Id")
+        title = l.get("Title","")
         tags = " ".join(l.get("Tags") or [])
-        applies = ", ".join(l.get("AppliesTo") or [])
-        lesson_file = l.get("File", "")
-        lesson_path = lessons_dir / lesson_file if lesson_file else mem / "lessons.md"
-        
-        # Read full lesson content if file exists
-        content = f"{l.get('Title','')}\nRule: {l.get('Rule','')}\nAppliesTo: {applies}"
-        if lesson_path.exists():
-            content = read_text(lesson_path)
-        
-        cur.execute("INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
-                    ("lesson", l.get("Id"), l.get("Introduced"), tags, l.get("Title"), content, str(lesson_path)))
+        date = l.get("Introduced")
+        file = l.get("File","")
+        path = lessons_dir / file if file else (mem / "lessons.md")
+        content = read_text(path) if path.exists() else f"{title}\nRule: {l.get('Rule','')}"
+        cur.execute(
+            "INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
+            ("lesson", lid, date, tags, title, content, str(path)),
+        )
 
-    # Journal entries
+    # Journal index lines
     for e in journal:
         tags = " ".join(e.get("Tags") or [])
-        files_list = e.get("Files")
-        if isinstance(files_list, dict):
-            files_list = []  # Handle empty object {}
-        files = ", ".join(files_list or [])
-        content = f"{e.get('Title','')}\nFiles: {files}"
-        cur.execute("INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
-                    ("journal", None, e.get("Date"), tags, e.get("Title"), content, str(mem / "journal" / e.get("MonthFile",""))))
+        files = e.get("Files") or []
+        if isinstance(files, dict):
+            files = []
+        content = f"{e.get('Title','')}\nFiles: {', '.join(files)}"
+        path = mem / "journal" / (e.get("MonthFile") or "")
+        cur.execute(
+            "INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
+            ("journal", None, e.get("Date"), tags, e.get("Title"), content, str(path)),
+        )
+
+    # Digests
+    digests = mem / "digests"
+    if digests.exists():
+        for p in digests.glob("*.digest.md"):
+            cur.execute(
+                "INSERT INTO memory_fts(kind,id,date,tags,title,content,path) VALUES (?,?,?,?,?,?,?)",
+                ("digest", None, None, "", p.name, read_text(p), str(p)),
+            )
 
     con.commit()
     con.close()
-
     print(f"Built: {out_db}")
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
 '@
 
-Write-Utf8NoBom (Join-Path $MemScripts "rebuild-memory-index.ps1") $rebuildIndex -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemScripts "query-memory.ps1") $queryScript -ForceWrite:$Force
-Write-Utf8NoBom (Join-Path $MemScripts "build-memory-sqlite.py") $buildSqlitePy -ForceWrite:$Force
+$querySqlitePy = @'
+#!/usr/bin/env python3
+"""Query memory SQLite FTS index."""
+import argparse
+import sqlite3
+from pathlib import Path
 
-# -------------------------
-# Clear active context script
-# -------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", required=True)
+    ap.add_argument("--q", required=True)
+    ap.add_argument("--area", default="All")
+    ap.add_argument("--format", default="Human")
+    args = ap.parse_args()
+
+    repo = Path(args.repo)
+    db = repo / ".cursor" / "memory" / "memory.sqlite"
+    if not db.exists():
+        print("SQLite DB not found. Run rebuild-memory-index.ps1 first.")
+        return 2
+
+    area = args.area.lower()
+    kind_filter = None
+    if area == "hotrules": kind_filter = "hot_rules"
+    elif area == "active": kind_filter = "active"
+    elif area == "memo": kind_filter = "memo"
+    elif area == "lessons": kind_filter = "lesson"
+    elif area == "journal": kind_filter = "journal"
+    elif area == "digests": kind_filter = "digest"
+
+    con = sqlite3.connect(str(db))
+    cur = con.cursor()
+
+    sql = "SELECT kind, id, date, title, path, snippet(memory_fts, 5, '[', ']', '...', 12) FROM memory_fts WHERE memory_fts MATCH ?"
+    params = [args.q]
+    if kind_filter:
+        sql += " AND kind = ?"
+        params.append(kind_filter)
+    sql += " LIMIT 20"
+
+    rows = cur.execute(sql, params).fetchall()
+    con.close()
+
+    if args.format.lower() == "ai":
+        paths = []
+        for r in rows:
+            p = r[4]
+            try:
+                rel = str(Path(p).resolve().relative_to(repo.resolve()))
+            except Exception:
+                rel = p
+            paths.append(rel.replace("\\","/"))
+        uniq = []
+        for p in paths:
+            if p not in uniq:
+                uniq.append(p)
+        if not uniq:
+            print(f"No matches for: {args.q}")
+        else:
+            print("Files to read:")
+            for p in uniq:
+                print(f"  @{p}")
+        return 0
+
+    if not rows:
+        print(f"No matches for: {args.q}")
+        return 0
+
+    for kind, idv, date, title, path, snip in rows:
+        print(f"==> {kind} | {idv or '-'} | {date or '-'} | {title}")
+        print(f"    {path}")
+        print(f"    {snip}")
+        print("")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'@
+
 $clearActive = @'
 <#
 clear-active.ps1
-Resets active-context.md to a blank template.
-Run this when your task is complete.
+Resets active-context.md to blank template.
 #>
-
-$RepoRoot = if ($PSScriptRoot) { 
-  (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path 
-} else { 
-  (Get-Location).Path 
-}
-
-$ActivePath = Join-Path $RepoRoot ".cursor\memory\active-context.md"
-
-$Template = @"
-# Active Context (Session Scratchpad)
-
-This file captures the **current session state**. It takes priority over older journal entries.
-
-**CLEAR THIS FILE** when your task is done (run ``scripts/memory/clear-active.ps1``).
-
-## Current Goal
-
-- 
-
-## Files in Focus
-
-- 
-
-## Recent Attempts / Findings
-
-- 
-
-## Temporary Constraints
-
-- 
-
-## Blockers
-
-- 
-"@
-
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($ActivePath, ($Template -replace "`r?`n", "`r`n"), $utf8NoBom)
-
-Write-Host "Cleared: $ActivePath" -ForegroundColor Green
-Write-Host "Active context reset to blank template." -ForegroundColor Cyan
-'@
-
-Write-Utf8NoBom (Join-Path $MemScripts "clear-active.ps1") $clearActive -ForceWrite:$Force
-
-# -------------------------
-# Lint memory script
-# -------------------------
-$lintMemory = @'
-<#
-lint-memory.ps1
-Validates the memory system for common issues:
-- Duplicate lesson IDs
-- Duplicate journal date headings
-- Missing required YAML fields in lessons
-- Lessons without proper ID format
-- Token budget warnings
-
-USAGE:
-  powershell -File .\scripts\memory\lint-memory.ps1
-#>
-
-[CmdletBinding()]
-param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -1212,213 +1375,38 @@ if ($PSScriptRoot) {
   $RepoRoot = (Get-Location).Path
 }
 
-$MemoryDir = Join-Path $RepoRoot ".cursor\memory"
-$LessonsDir = Join-Path $MemoryDir "lessons"
-$JournalDir = Join-Path $MemoryDir "journal"
+$ActivePath = Join-Path $RepoRoot ".cursor\memory\active-context.md"
 
-$errors = @()
-$warnings = @()
+$Template = @"
+# Active Context (Session Scratchpad)
 
-Write-Host "Linting Cursor Memory System..." -ForegroundColor Cyan
-Write-Host ""
+Priority: this overrides older journal history *for this session only*.
 
-# -------------------------
-# 1. Check lesson files
-# -------------------------
-Write-Host "Checking lessons..." -ForegroundColor White
+CLEAR this file when the task is done:
+- Run ``scripts/memory/clear-active.ps1``
 
-$lessonFiles = Get-ChildItem -Path $LessonsDir -Filter "L-*.md" -ErrorAction SilentlyContinue
-$lessonIds = @{}
-$requiredFields = @("id", "title", "rule")
+## Current Goal
+-
 
-foreach ($lf in $lessonFiles) {
-  $content = Get-Content -Raw -Encoding UTF8 $lf.FullName
-  
-  # Check for YAML frontmatter
-  if (-not ($content -match '(?ms)^---\r?\n(.*?)\r?\n---')) {
-    $errors += "[$($lf.Name)] Missing YAML frontmatter"
-    continue
-  }
-  
-  $yaml = $Matches[1]
-  $meta = @{}
-  
-  # Parse YAML
-  foreach ($line in ($yaml -split "`r?`n")) {
-    if ($line -match '^([a-zA-Z_][a-zA-Z0-9_]*):\s*(.*)$') {
-      $key = $Matches[1].Trim().ToLower()
-      $value = $Matches[2].Trim()
-      if ($value -match '^\[(.*)\]$') {
-        $meta[$key] = $Matches[1]
-      } else {
-        $meta[$key] = $value
-      }
-    }
-  }
-  
-  # Check required fields
-  foreach ($field in $requiredFields) {
-    if (-not $meta[$field] -or [string]::IsNullOrWhiteSpace($meta[$field])) {
-      $errors += "[$($lf.Name)] Missing required field: $field"
-    }
-  }
-  
-  # Check ID format
-  if ($meta["id"]) {
-    $id = $meta["id"]
-    if (-not ($id -match '^L-\d{3}$')) {
-      $warnings += "[$($lf.Name)] ID '$id' doesn't match format L-XXX (3 digits)"
-    }
-    
-    # Check for duplicates
-    if ($lessonIds.ContainsKey($id)) {
-      $errors += "[$($lf.Name)] Duplicate ID '$id' (also in $($lessonIds[$id]))"
-    } else {
-      $lessonIds[$id] = $lf.Name
-    }
-    
-    # Check filename matches ID
-    $expectedPrefix = $id.ToLower()
-    if (-not $lf.Name.ToLower().StartsWith($expectedPrefix)) {
-      $warnings += "[$($lf.Name)] Filename doesn't start with ID '$id'"
-    }
-  }
-  
-  # Check status field
-  if ($meta["status"]) {
-    $validStatuses = @("Active", "Superseded", "Deprecated", "Draft")
-    if ($meta["status"] -notin $validStatuses) {
-      $warnings += "[$($lf.Name)] Unknown status '$($meta["status"])' (expected: $($validStatuses -join ', '))"
-    }
-  }
-}
+## Files in Focus
+-
 
-$lessonCount = if ($lessonFiles) { @($lessonFiles).Count } else { 0 }
-Write-Host "  Found $lessonCount lesson files" -ForegroundColor Gray
+## Findings / Decisions
+-
 
-# -------------------------
-# 2. Check journal files for duplicate dates
-# -------------------------
-Write-Host "Checking journals..." -ForegroundColor White
+## Temporary Constraints
+-
 
-$journalFiles = Get-ChildItem -Path $JournalDir -Filter "*.md" -ErrorAction SilentlyContinue | 
-  Where-Object { $_.Name -match '^\d{4}-\d{2}\.md$' }
+## Blockers
+-
+"@
 
-foreach ($jf in $journalFiles) {
-  $content = Get-Content -Raw -Encoding UTF8 $jf.FullName
-  $dateMatches = [regex]::Matches($content, '(?m)^##\s+(\d{4}-\d{2}-\d{2})')
-  
-  $dates = @{}
-  foreach ($dm in $dateMatches) {
-    $date = $dm.Groups[1].Value
-    if ($dates.ContainsKey($date)) {
-      $dates[$date]++
-      $errors += "[$($jf.Name)] Duplicate date heading: $date (appears $($dates[$date]) times)"
-    } else {
-      $dates[$date] = 1
-    }
-  }
-}
+$enc = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($ActivePath, ($Template -replace "`r?`n", "`r`n"), $enc)
 
-$journalCount = if ($journalFiles) { @($journalFiles).Count } else { 0 }
-Write-Host "  Found $journalCount journal files" -ForegroundColor Gray
-
-# -------------------------
-# 3. Check token budget
-# -------------------------
-Write-Host "Checking token budget..." -ForegroundColor White
-
-$hotFiles = @(
-  (Join-Path $MemoryDir "hot-rules.md"),
-  (Join-Path $MemoryDir "active-context.md"),
-  (Join-Path $MemoryDir "memo.md")
-)
-
-$totalChars = 0
-foreach ($hf in $hotFiles) {
-  if (Test-Path $hf) {
-    $chars = (Get-Content $hf -Raw -ErrorAction SilentlyContinue).Length
-    $totalChars += $chars
-    
-    # Warn if individual file is too large
-    if ($chars -gt 3000) {
-      $warnings += "[$(Split-Path $hf -Leaf)] File is $chars chars (~$([math]::Round($chars/4)) tokens) - consider trimming"
-    }
-  }
-}
-
-$estimatedTokens = [math]::Round($totalChars / 4)
-Write-Host "  Always-read layer: $totalChars chars (~$estimatedTokens tokens)" -ForegroundColor Gray
-
-if ($totalChars -gt 8000) {
-  $errors += "[Token Budget] Always-read layer exceeds 8000 chars (~2000 tokens)"
-} elseif ($totalChars -gt 6000) {
-  $warnings += "[Token Budget] Always-read layer is $totalChars chars - approaching limit"
-}
-
-# -------------------------
-# 4. Check for orphaned files
-# -------------------------
-Write-Host "Checking for orphans..." -ForegroundColor White
-
-# Check if lessons index exists
-$lessonsIndex = Join-Path $LessonsDir "index.md"
-if (-not (Test-Path $lessonsIndex)) {
-  $warnings += "[lessons/index.md] Missing - run rebuild-memory-index.ps1"
-}
-
-# Check if journal index exists  
-$journalIndex = Join-Path $MemoryDir "journal-index.md"
-if (-not (Test-Path $journalIndex)) {
-  $warnings += "[journal-index.md] Missing - run rebuild-memory-index.ps1"
-}
-
-# -------------------------
-# Report results
-# -------------------------
-Write-Host ""
-Write-Host "====== LINT RESULTS ======" -ForegroundColor White
-
-$errorCount = if ($errors) { @($errors).Count } else { 0 }
-$warningCount = if ($warnings) { @($warnings).Count } else { 0 }
-
-if ($errorCount -eq 0 -and $warningCount -eq 0) {
-  Write-Host "All checks passed!" -ForegroundColor Green
-} else {
-  if ($errorCount -gt 0) {
-    Write-Host ""
-    Write-Host "ERRORS ($errorCount):" -ForegroundColor Red
-    foreach ($e in $errors) {
-      Write-Host "  ERROR: $e" -ForegroundColor Red
-    }
-  }
-  
-  if ($warningCount -gt 0) {
-    Write-Host ""
-    Write-Host "WARNINGS ($warningCount):" -ForegroundColor Yellow
-    foreach ($w in $warnings) {
-      Write-Host "  WARN: $w" -ForegroundColor Yellow
-    }
-  }
-}
-
-Write-Host ""
-
-# Return exit code
-if ($errorCount -gt 0) {
-  Write-Host "Lint failed with $errorCount error(s)" -ForegroundColor Red
-  exit 1
-} else {
-  Write-Host "Lint passed" -ForegroundColor Green
-  exit 0
-}
+Write-Host "Cleared: $ActivePath" -ForegroundColor Green
 '@
 
-Write-Utf8NoBom (Join-Path $MemScripts "lint-memory.ps1") $lintMemory -ForceWrite:$Force
-
-# -------------------------
-# Add lesson helper script
-# -------------------------
 $addLesson = @'
 <#
 add-lesson.ps1
@@ -1426,8 +1414,7 @@ Creates a new lesson file with proper ID and YAML frontmatter.
 Automatically assigns the next available lesson ID.
 
 USAGE:
-  powershell -File .\scripts\memory\add-lesson.ps1 -Title "Always validate input" -Tags "Security,Validation" -Rule "Validate all user input before processing"
-  powershell -File .\scripts\memory\add-lesson.ps1 -Title "Use async await" -Tags "Performance" -AppliesTo "src/**/*.ts"
+  powershell -File .\scripts\memory\add-lesson.ps1 -Title "Always validate input" -Tags "Reliability,Data" -Rule "Validate all user input before processing"
 #>
 
 [CmdletBinding()]
@@ -1436,9 +1423,7 @@ param(
   [Parameter(Mandatory=$true)][string]$Tags,
   [Parameter(Mandatory=$true)][string]$Rule,
   [string]$AppliesTo = "*",
-  [string]$Triggers = "",
-  [string]$Symptom = "TODO: Describe what happened",
-  [string]$RootCause = "TODO: Describe why it happened"
+  [string]$Triggers = ""
 )
 
 Set-StrictMode -Version Latest
@@ -1453,7 +1438,6 @@ if ($PSScriptRoot) {
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $LessonsDir = Join-Path $MemoryDir "lessons"
 
-# Ensure lessons directory exists
 if (-not (Test-Path $LessonsDir)) {
   New-Item -ItemType Directory -Force -Path $LessonsDir | Out-Null
 }
@@ -1461,7 +1445,6 @@ if (-not (Test-Path $LessonsDir)) {
 # Find next available ID
 $existingLessons = Get-ChildItem -Path $LessonsDir -Filter "L-*.md" -ErrorAction SilentlyContinue
 $maxId = 0
-
 foreach ($lf in $existingLessons) {
   if ($lf.Name -match '^L-(\d{3})') {
     $id = [int]$Matches[1]
@@ -1474,7 +1457,7 @@ $lessonId = "L-{0:D3}" -f $nextId
 
 # Create kebab-case filename
 $kebabTitle = $Title.ToLower() -replace '[^a-z0-9]+', '-' -replace '^-|-$', ''
-$kebabTitle = $kebabTitle.Substring(0, [Math]::Min(50, $kebabTitle.Length))  # Limit length
+$kebabTitle = $kebabTitle.Substring(0, [Math]::Min(50, $kebabTitle.Length))
 $fileName = "$lessonId-$kebabTitle.md"
 $filePath = Join-Path $LessonsDir $fileName
 
@@ -1498,7 +1481,7 @@ if ($Triggers) {
   }
   $triggersYaml = "triggers:`r`n" + ($triggerLines -join "`r`n")
 } else {
-  $triggersYaml = "triggers:`r`n  - TODO: add error messages or keywords that indicate this lesson"
+  $triggersYaml = "triggers:`r`n  - TODO: add error messages or keywords"
 }
 
 $today = Get-Date -Format "yyyy-MM-dd"
@@ -1520,11 +1503,11 @@ rule: $Rule
 
 ## Symptom
 
-$Symptom
+TODO: Describe what happened
 
 ## Root Cause
 
-$RootCause
+TODO: Describe why it happened
 
 ## Wrong Approach (DO NOT REPEAT)
 
@@ -1540,8 +1523,8 @@ $RootCause
 - Journal: ``journal/$($today.Substring(0,7)).md#$today``
 "@
 
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($filePath, ($content -replace "`r?`n", "`r`n"), $utf8NoBom)
+$enc = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($filePath, ($content -replace "`r?`n", "`r`n"), $enc)
 
 Write-Host "Created lesson: $filePath" -ForegroundColor Green
 Write-Host "  ID: $lessonId" -ForegroundColor Gray
@@ -1553,11 +1536,6 @@ Write-Host "  1) Edit the file to fill in TODO sections" -ForegroundColor White
 Write-Host "  2) Run: scripts\memory\rebuild-memory-index.ps1" -ForegroundColor White
 '@
 
-Write-Utf8NoBom (Join-Path $MemScripts "add-lesson.ps1") $addLesson -ForceWrite:$Force
-
-# -------------------------
-# Add journal entry helper script
-# -------------------------
 $addJournalEntry = @'
 <#
 add-journal-entry.ps1
@@ -1590,13 +1568,11 @@ if ($PSScriptRoot) {
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $JournalDir = Join-Path $MemoryDir "journal"
 
-# Ensure journal directory exists
 if (-not (Test-Path $JournalDir)) {
   New-Item -ItemType Directory -Force -Path $JournalDir | Out-Null
 }
 
-# Get month from date
-$month = $Date.Substring(0, 7)  # YYYY-MM
+$month = $Date.Substring(0, 7)
 $journalFile = Join-Path $JournalDir "$month.md"
 
 # Format tags
@@ -1618,14 +1594,12 @@ if ($Files) {
 
 $entry = $entryLines -join "`r`n"
 
-# Check if file exists
 if (Test-Path $journalFile) {
   $content = Get-Content -Raw -Encoding UTF8 $journalFile
   
-  # Check if date heading exists
   $dateHeading = "## $Date"
   if ($content -match "(?m)^## $Date") {
-    # Date exists - find where to insert (after the heading, before next heading or EOF)
+    # Date exists - append to that section
     $pattern = "(?ms)(## $Date[^\r\n]*\r?\n)(.*?)(?=^## \d{4}-\d{2}-\d{2}|\z)"
     if ($content -match $pattern) {
       $existingBlock = $Matches[0]
@@ -1637,8 +1611,8 @@ if (Test-Path $journalFile) {
     $content = $content.TrimEnd() + "`r`n`r`n$dateHeading`r`n`r`n$entry`r`n"
   }
   
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($journalFile, $content, $utf8NoBom)
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($journalFile, $content, $enc)
   
 } else {
   # Create new file
@@ -1651,8 +1625,8 @@ if (Test-Path $journalFile) {
 $entry
 "@
   
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($journalFile, ($header -replace "`r?`n", "`r`n"), $utf8NoBom)
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($journalFile, ($header -replace "`r?`n", "`r`n"), $enc)
 }
 
 Write-Host "Added journal entry to: $journalFile" -ForegroundColor Green
@@ -1661,26 +1635,32 @@ Write-Host "  Tags: $tagString" -ForegroundColor Gray
 Write-Host "  Title: $Title" -ForegroundColor Gray
 '@
 
-Write-Utf8NoBom (Join-Path $MemScripts "add-journal-entry.ps1") $addJournalEntry -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "rebuild-memory-index.ps1") $rebuildIndex -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "lint-memory.ps1") $linter -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "query-memory.ps1") $queryScript -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "build-memory-sqlite.py") $buildSqlitePy -ForceWrite:$Force -LineEndings "LF"
+Write-TextFile (Join-Path $MemScripts "query-memory-sqlite.py") $querySqlitePy -ForceWrite:$Force -LineEndings "LF"
+Write-TextFile (Join-Path $MemScripts "clear-active.ps1") $clearActive -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "add-lesson.ps1") $addLesson -ForceWrite:$Force
+Write-TextFile (Join-Path $MemScripts "add-journal-entry.ps1") $addJournalEntry -ForceWrite:$Force
 
 # -------------------------
-# Git pre-commit hook (auto-rebuild indexes)
+# Git hooks (portable + immediate)
 # -------------------------
-$gitHook = @'
+
+$hookBody = @'
 #!/bin/sh
-# Auto-rebuild Cursor Memory indexes before commit
-# This ensures indexes are always fresh
+# Cursor Memory: auto-rebuild indexes + lint before commit
 
-echo "Rebuilding Cursor Memory indexes..."
-
-# Run the rebuild script
-if command -v powershell.exe &> /dev/null; then
-    powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" 2>/dev/null
-elif command -v pwsh &> /dev/null; then
-    pwsh -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" 2>/dev/null
+echo "[CursorMemory] Rebuilding indexes..."
+if command -v powershell.exe >/dev/null 2>&1; then
+  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" || exit 1
+  powershell.exe -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1" || exit 1
+elif command -v pwsh >/dev/null 2>&1; then
+  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/rebuild-memory-index.ps1" || exit 1
+  pwsh -ExecutionPolicy Bypass -File "./scripts/memory/lint-memory.ps1" || exit 1
 fi
 
-# Stage the updated index files
 git add .cursor/memory/lessons/index.md 2>/dev/null
 git add .cursor/memory/lessons-index.json 2>/dev/null
 git add .cursor/memory/journal-index.md 2>/dev/null
@@ -1690,47 +1670,67 @@ git add .cursor/memory/digests/*.digest.md 2>/dev/null
 exit 0
 '@
 
-# Only create git hook if .git/hooks exists
+# Write .githooks/pre-commit (portable path)
+$githookPath = Join-Path $GithooksDir "pre-commit"
+Write-TextFile $githookPath $hookBody -ForceWrite:$Force -LineEndings "LF"
+
+# Also write .git/hooks/pre-commit for immediate effect
 if (Test-Path $GitHooksDir) {
-  $hookPath = Join-Path $GitHooksDir "pre-commit"
-  
-  # Check if hook already exists and contains our marker
-  $existingHook = ""
-  if (Test-Path $hookPath) {
-    $existingHook = Get-Content -Raw -Path $hookPath -ErrorAction SilentlyContinue
-  }
-  
-  if ($existingHook -notmatch "Cursor Memory indexes") {
-    if ([string]::IsNullOrWhiteSpace($existingHook)) {
-      # No existing hook, create new one
-      Write-Utf8NoBom $hookPath $gitHook -ForceWrite:$Force
+  $legacyHookPath = Join-Path $GitHooksDir "pre-commit"
+  if ((Test-Path $legacyHookPath) -and (-not $Force)) {
+    $existing = Get-Content -Raw -ErrorAction SilentlyContinue $legacyHookPath
+    if ($existing -match "Cursor Memory: auto-rebuild") {
+      Write-Host "SKIP (exists): $legacyHookPath" -ForegroundColor DarkYellow
     } else {
-      # Append to existing hook
-      $combined = $existingHook.TrimEnd() + "`n`n" + $gitHook
-      Write-Utf8NoBom $hookPath $combined -ForceWrite:$true
+      # append safely
+      $combined = ($existing.TrimEnd() + "`n`n" + $hookBody)
+      Write-TextFile $legacyHookPath $combined -ForceWrite:$true -LineEndings "LF"
     }
-    Write-Host "HOOK: $hookPath" -ForegroundColor Green
   } else {
-    Write-Host "SKIP (exists): Git hook already contains memory rebuild" -ForegroundColor DarkYellow
+    Write-TextFile $legacyHookPath $hookBody -ForceWrite:$Force -LineEndings "LF"
   }
+}
+
+# -------------------------
+# Token budget check
+# -------------------------
+
+$alwaysRead = @(
+  (Join-Path $MemoryDir "hot-rules.md"),
+  (Join-Path $MemoryDir "active-context.md"),
+  (Join-Path $MemoryDir "memo.md")
+)
+
+$totalChars = 0
+foreach ($p in $alwaysRead) {
+  if (Test-Path $p) {
+    $t = Get-Content -Raw -ErrorAction SilentlyContinue $p
+    if ($t) { $totalChars += $t.Length }
+  }
+}
+$estimatedTokens = [math]::Round($totalChars / 4)
+
+Write-Host ""
+if ($totalChars -gt 8000) {
+  Write-Host "WARNING: Always-read layer is $totalChars chars (~$estimatedTokens tokens)." -ForegroundColor Yellow
 } else {
-  Write-Host "SKIP: .git/hooks not found (not a git repo or hooks disabled)" -ForegroundColor DarkYellow
+  Write-Host "Always-read layer: $totalChars chars (~$estimatedTokens tokens) - Healthy" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "Setup complete. (Memory System v3)" -ForegroundColor Green
+Write-Host "Setup complete. (Memory System v3.2)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1) Update memo.md with your project's ownership map and current truth" -ForegroundColor White
-Write-Host "  2) Indexes auto-rebuild on git commit (or run manually)" -ForegroundColor White
+Write-Host "  1) Run: powershell -ExecutionPolicy Bypass -File scripts/memory/rebuild-memory-index.ps1" -ForegroundColor White
+Write-Host "  2) Run: powershell -ExecutionPolicy Bypass -File scripts/memory/lint-memory.ps1" -ForegroundColor White
+Write-Host "  3) Enable portable hooks: git config core.hooksPath .githooks" -ForegroundColor White
 Write-Host ""
 Write-Host "Helper scripts:" -ForegroundColor Cyan
-Write-Host "  Add lesson:      scripts\memory\add-lesson.ps1 -Title ""..."" -Tags ""..."" -Rule ""...""" -ForegroundColor DarkGray
-Write-Host "  Add journal:     scripts\memory\add-journal-entry.ps1 -Tags ""..."" -Title ""...""" -ForegroundColor DarkGray
-Write-Host "  Search (SQLite): scripts\memory\query-memory.ps1 -Query ""auth"" -Format AI" -ForegroundColor DarkGray
-Write-Host "  Lint:            scripts\memory\lint-memory.ps1" -ForegroundColor DarkGray
-Write-Host "  Rebuild index:   scripts\memory\rebuild-memory-index.ps1" -ForegroundColor DarkGray
-Write-Host "  Clear session:   scripts\memory\clear-active.ps1" -ForegroundColor DarkGray
+Write-Host "  Add lesson:  scripts\memory\add-lesson.ps1 -Title ""..."" -Tags ""..."" -Rule ""...""" -ForegroundColor DarkGray
+Write-Host "  Add journal: scripts\memory\add-journal-entry.ps1 -Tags ""..."" -Title ""...""" -ForegroundColor DarkGray
+Write-Host "  Query:       scripts\memory\query-memory.ps1 -Query ""..."" [-UseSqlite]" -ForegroundColor DarkGray
+Write-Host "  Lint:        scripts\memory\lint-memory.ps1" -ForegroundColor DarkGray
+Write-Host "  Clear:       scripts\memory\clear-active.ps1" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "Remember: Add .cursor/memory/memory.sqlite to .gitignore (generated file)" -ForegroundColor Yellow
+Write-Host "Remember: Add .cursor/memory/memory.sqlite to .gitignore" -ForegroundColor Yellow
 Write-Host ""
