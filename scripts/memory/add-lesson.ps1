@@ -2,6 +2,7 @@
 add-lesson.ps1
 Creates a new lesson file with proper ID and YAML frontmatter.
 Automatically assigns the next available lesson ID.
+Tags are canonicalized against tag-vocabulary.md.
 
 USAGE:
   powershell -File .\scripts\memory\add-lesson.ps1 -Title "Always validate input" -Tags "Reliability,Data" -Rule "Validate all user input before processing"
@@ -27,9 +28,26 @@ if ($PSScriptRoot) {
 
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $LessonsDir = Join-Path $MemoryDir "lessons"
+$TagVocabPath = Join-Path $MemoryDir "tag-vocabulary.md"
 
 if (-not (Test-Path $LessonsDir)) {
   New-Item -ItemType Directory -Force -Path $LessonsDir | Out-Null
+}
+
+function ReadText([string]$p) {
+  $t = Get-Content -Raw -Encoding UTF8 -ErrorAction Stop $p
+  if ($t.Length -gt 0 -and [int]$t[0] -eq 0xFEFF) { $t = $t.Substring(1) }
+  return $t
+}
+
+# Load canonical tags (case-insensitive lookup -> canonical casing)
+$canonTags = @{}
+if (Test-Path $TagVocabPath) {
+  $tv = ReadText $TagVocabPath
+  foreach ($m in [regex]::Matches($tv, '(?m)^\-\s+\[([^\]]+)\]')) {
+    $canon = $m.Groups[1].Value.Trim()
+    $canonTags[$canon.ToLower()] = $canon
+  }
 }
 
 # Find next available ID
@@ -42,33 +60,39 @@ foreach ($lf in $existingLessons) {
   }
 }
 
-$nextId = $maxId + 1
-$lessonId = "L-{0:D3}" -f $nextId
+$lessonId = "L-{0:D3}" -f ($maxId + 1)
 
-# Create kebab-case filename
-$kebabTitle = $Title.ToLower() -replace '[^a-z0-9]+', '-' -replace '^-|-$', ''
-$kebabTitle = $kebabTitle.Substring(0, [Math]::Min(50, $kebabTitle.Length))
+# Create kebab-case filename (fallback if empty)
+$kebabTitle = ($Title.ToLower() -replace '[^a-z0-9]+', '-' -replace '^-|-$', '')
+if ([string]::IsNullOrWhiteSpace($kebabTitle)) { $kebabTitle = "lesson" }
+if ($kebabTitle.Length -gt 50) { $kebabTitle = $kebabTitle.Substring(0, 50) }
 $fileName = "$lessonId-$kebabTitle.md"
 $filePath = Join-Path $LessonsDir $fileName
 
-# Format tags
-$tagList = $Tags -split ',' | ForEach-Object { $_.Trim() }
-$tagsYaml = "[$($tagList -join ', ')]"
+# Normalize tags using vocabulary if present
+$rawTags = $Tags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+$finalTags = @()
+foreach ($t in $rawTags) {
+  $k = $t.ToLower()
+  if ($canonTags.Count -gt 0) {
+    if ($canonTags.ContainsKey($k)) { $finalTags += $canonTags[$k] }
+    else { throw "Unknown tag '$t'. Add it to tag-vocabulary.md or fix the tag." }
+  } else {
+    $finalTags += $t
+  }
+}
+$finalTags = $finalTags | Select-Object -Unique
+$tagsYaml = "[$($finalTags -join ', ')]"
 
 # Format applies_to
 $appliesLines = @()
-foreach ($a in ($AppliesTo -split ',')) {
-  $appliesLines += "  - $($a.Trim())"
-}
+foreach ($a in ($AppliesTo -split ',')) { $appliesLines += "  - $($a.Trim())" }
 $appliesYaml = $appliesLines -join "`r`n"
 
 # Format triggers
-$triggersYaml = ""
 if ($Triggers) {
   $triggerLines = @()
-  foreach ($t in ($Triggers -split ',')) {
-    $triggerLines += "  - $($t.Trim())"
-  }
+  foreach ($t in ($Triggers -split ',')) { $triggerLines += "  - $($t.Trim())" }
   $triggersYaml = "triggers:`r`n" + ($triggerLines -join "`r`n")
 } else {
   $triggersYaml = "triggers:`r`n  - TODO: add error messages or keywords"
@@ -121,6 +145,4 @@ Write-Host "  ID: $lessonId" -ForegroundColor Gray
 Write-Host "  Title: $Title" -ForegroundColor Gray
 Write-Host "  Tags: $tagsYaml" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1) Edit the file to fill in TODO sections" -ForegroundColor White
-Write-Host "  2) Run: scripts\memory\rebuild-memory-index.ps1" -ForegroundColor White
+Write-Host "Next: run scripts\memory\rebuild-memory-index.ps1" -ForegroundColor Cyan

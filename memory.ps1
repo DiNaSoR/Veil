@@ -1,5 +1,5 @@
 <#
-setup-cursor-memory.ps1 (Memory v3.2)
+setup-cursor-memory.ps1 (Memory v3.2.1)
 Windows-first, token-safe, scalable repo memory for Cursor (or any AI agent).
 
 Merged from v3 (our helpers) + GPT v3.1 (BOM handling, tag validation, portable hooks):
@@ -265,7 +265,7 @@ $journalMonth = @"
 
 ## $today
 
-- [Process] Initialized memory system (Memory v3.2)
+- [Process] Initialized memory system (Memory v3.2.1)
   - Why: token-safe AI memory + indexed retrieval + portable hooks
   - Key files:
     - ``.cursor/memory/*``
@@ -436,8 +436,8 @@ Write-TextFile (Join-Path $TemplatesDir "adr.template.md") $templateAdr -ForceWr
 
 $memoryRule = @"
 ---
-description: Memory System v3.2 - Authority + Atomic Retrieval + Token Safety
-globs:
+description: Memory System v3.2.1 - Authority + Atomic Retrieval + Token Safety
+globs: ["**/*"]
 alwaysApply: true
 ---
 
@@ -1412,6 +1412,7 @@ $addLesson = @'
 add-lesson.ps1
 Creates a new lesson file with proper ID and YAML frontmatter.
 Automatically assigns the next available lesson ID.
+Tags are canonicalized against tag-vocabulary.md.
 
 USAGE:
   powershell -File .\scripts\memory\add-lesson.ps1 -Title "Always validate input" -Tags "Reliability,Data" -Rule "Validate all user input before processing"
@@ -1437,9 +1438,26 @@ if ($PSScriptRoot) {
 
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $LessonsDir = Join-Path $MemoryDir "lessons"
+$TagVocabPath = Join-Path $MemoryDir "tag-vocabulary.md"
 
 if (-not (Test-Path $LessonsDir)) {
   New-Item -ItemType Directory -Force -Path $LessonsDir | Out-Null
+}
+
+function ReadText([string]$p) {
+  $t = Get-Content -Raw -Encoding UTF8 -ErrorAction Stop $p
+  if ($t.Length -gt 0 -and [int]$t[0] -eq 0xFEFF) { $t = $t.Substring(1) }
+  return $t
+}
+
+# Load canonical tags (case-insensitive lookup -> canonical casing)
+$canonTags = @{}
+if (Test-Path $TagVocabPath) {
+  $tv = ReadText $TagVocabPath
+  foreach ($m in [regex]::Matches($tv, '(?m)^\-\s+\[([^\]]+)\]')) {
+    $canon = $m.Groups[1].Value.Trim()
+    $canonTags[$canon.ToLower()] = $canon
+  }
 }
 
 # Find next available ID
@@ -1452,33 +1470,39 @@ foreach ($lf in $existingLessons) {
   }
 }
 
-$nextId = $maxId + 1
-$lessonId = "L-{0:D3}" -f $nextId
+$lessonId = "L-{0:D3}" -f ($maxId + 1)
 
-# Create kebab-case filename
-$kebabTitle = $Title.ToLower() -replace '[^a-z0-9]+', '-' -replace '^-|-$', ''
-$kebabTitle = $kebabTitle.Substring(0, [Math]::Min(50, $kebabTitle.Length))
+# Create kebab-case filename (fallback if empty)
+$kebabTitle = ($Title.ToLower() -replace '[^a-z0-9]+', '-' -replace '^-|-$', '')
+if ([string]::IsNullOrWhiteSpace($kebabTitle)) { $kebabTitle = "lesson" }
+if ($kebabTitle.Length -gt 50) { $kebabTitle = $kebabTitle.Substring(0, 50) }
 $fileName = "$lessonId-$kebabTitle.md"
 $filePath = Join-Path $LessonsDir $fileName
 
-# Format tags
-$tagList = $Tags -split ',' | ForEach-Object { $_.Trim() }
-$tagsYaml = "[$($tagList -join ', ')]"
+# Normalize tags using vocabulary if present
+$rawTags = $Tags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+$finalTags = @()
+foreach ($t in $rawTags) {
+  $k = $t.ToLower()
+  if ($canonTags.Count -gt 0) {
+    if ($canonTags.ContainsKey($k)) { $finalTags += $canonTags[$k] }
+    else { throw "Unknown tag '$t'. Add it to tag-vocabulary.md or fix the tag." }
+  } else {
+    $finalTags += $t
+  }
+}
+$finalTags = $finalTags | Select-Object -Unique
+$tagsYaml = "[$($finalTags -join ', ')]"
 
 # Format applies_to
 $appliesLines = @()
-foreach ($a in ($AppliesTo -split ',')) {
-  $appliesLines += "  - $($a.Trim())"
-}
+foreach ($a in ($AppliesTo -split ',')) { $appliesLines += "  - $($a.Trim())" }
 $appliesYaml = $appliesLines -join "`r`n"
 
 # Format triggers
-$triggersYaml = ""
 if ($Triggers) {
   $triggerLines = @()
-  foreach ($t in ($Triggers -split ',')) {
-    $triggerLines += "  - $($t.Trim())"
-  }
+  foreach ($t in ($Triggers -split ',')) { $triggerLines += "  - $($t.Trim())" }
   $triggersYaml = "triggers:`r`n" + ($triggerLines -join "`r`n")
 } else {
   $triggersYaml = "triggers:`r`n  - TODO: add error messages or keywords"
@@ -1531,9 +1555,7 @@ Write-Host "  ID: $lessonId" -ForegroundColor Gray
 Write-Host "  Title: $Title" -ForegroundColor Gray
 Write-Host "  Tags: $tagsYaml" -ForegroundColor Gray
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1) Edit the file to fill in TODO sections" -ForegroundColor White
-Write-Host "  2) Run: scripts\memory\rebuild-memory-index.ps1" -ForegroundColor White
+Write-Host "Next: run scripts\memory\rebuild-memory-index.ps1" -ForegroundColor Cyan
 '@
 
 $addJournalEntry = @'
@@ -1541,6 +1563,8 @@ $addJournalEntry = @'
 add-journal-entry.ps1
 Adds a journal entry to the current month's journal file.
 Ensures only one heading per date (appends to existing date if present).
+Tags are canonicalized against tag-vocabulary.md.
+BOM-safe file reading.
 
 USAGE:
   powershell -File .\scripts\memory\add-journal-entry.ps1 -Tags "UI,Fix" -Title "Fixed button alignment"
@@ -1567,55 +1591,78 @@ if ($PSScriptRoot) {
 
 $MemoryDir = Join-Path $RepoRoot ".cursor\memory"
 $JournalDir = Join-Path $MemoryDir "journal"
+$TagVocabPath = Join-Path $MemoryDir "tag-vocabulary.md"
 
 if (-not (Test-Path $JournalDir)) {
   New-Item -ItemType Directory -Force -Path $JournalDir | Out-Null
 }
 
+function ReadText([string]$p) {
+  $t = Get-Content -Raw -Encoding UTF8 -ErrorAction Stop $p
+  if ($t.Length -gt 0 -and [int]$t[0] -eq 0xFEFF) { $t = $t.Substring(1) }
+  return $t
+}
+
+# Load canonical tags
+$canonTags = @{}
+if (Test-Path $TagVocabPath) {
+  $tv = ReadText $TagVocabPath
+  foreach ($m in [regex]::Matches($tv, '(?m)^\-\s+\[([^\]]+)\]')) {
+    $canon = $m.Groups[1].Value.Trim()
+    $canonTags[$canon.ToLower()] = $canon
+  }
+}
+
 $month = $Date.Substring(0, 7)
 $journalFile = Join-Path $JournalDir "$month.md"
 
-# Format tags
-$tagList = $Tags -split ',' | ForEach-Object { "[$($_.Trim())]" }
-$tagString = $tagList -join ""
+# Normalize tags
+$rawTags = $Tags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+$finalTags = @()
+foreach ($t in $rawTags) {
+  $k = $t.ToLower()
+  if ($canonTags.Count -gt 0) {
+    if ($canonTags.ContainsKey($k)) { $finalTags += $canonTags[$k] }
+    else { throw "Unknown tag '$t'. Add it to tag-vocabulary.md or fix the tag." }
+  } else {
+    $finalTags += $t
+  }
+}
+$finalTags = $finalTags | Select-Object -Unique
+$tagString = ($finalTags | ForEach-Object { "[$_]" }) -join ""
 
 # Build entry
 $entryLines = @()
 $entryLines += "- $tagString $Title"
-if ($Why) {
-  $entryLines += "  - Why: $Why"
-}
+if ($Why) { $entryLines += "  - Why: $Why" }
 if ($Files) {
   $entryLines += "  - Key files:"
-  foreach ($f in ($Files -split ',')) {
-    $entryLines += "    - ``$($f.Trim())``"
-  }
+  foreach ($f in ($Files -split ',')) { $entryLines += "    - ``$($f.Trim())``" }
 }
-
 $entry = $entryLines -join "`r`n"
 
+$enc = New-Object System.Text.UTF8Encoding($false)
+$dateHeading = "## $Date"
+$safeDate = [regex]::Escape($Date)
+
 if (Test-Path $journalFile) {
-  $content = Get-Content -Raw -Encoding UTF8 $journalFile
-  
-  $dateHeading = "## $Date"
-  if ($content -match "(?m)^## $Date") {
-    # Date exists - append to that section
-    $pattern = "(?ms)(## $Date[^\r\n]*\r?\n)(.*?)(?=^## \d{4}-\d{2}-\d{2}|\z)"
-    if ($content -match $pattern) {
-      $existingBlock = $Matches[0]
-      $newBlock = $existingBlock.TrimEnd() + "`r`n`r`n$entry`r`n"
-      $content = $content -replace [regex]::Escape($existingBlock), $newBlock
-    }
+  $content = ReadText $journalFile
+
+  if ($content -match "(?m)^##\s+$safeDate\s*$") {
+    # Append to existing date block
+    $pattern = "(?ms)(^##\s+$safeDate\s*\r?\n)(.*?)(?=^##\s+\d{4}-\d{2}-\d{2}\s*$|\z)"
+    $rx = New-Object System.Text.RegularExpressions.Regex($pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    $content = $rx.Replace($content, {
+      param($m)
+      $block = $m.Value.TrimEnd()
+      return $block + "`r`n`r`n" + $entry + "`r`n"
+    }, 1)
   } else {
-    # Date doesn't exist - add new section at the end
     $content = $content.TrimEnd() + "`r`n`r`n$dateHeading`r`n`r`n$entry`r`n"
   }
-  
-  $enc = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($journalFile, $content, $enc)
-  
+
+  [System.IO.File]::WriteAllText($journalFile, ($content -replace "`r?`n", "`r`n"), $enc)
 } else {
-  # Create new file
   $projectName = Split-Path -Leaf $RepoRoot
   $header = @"
 # Development Journal - $projectName ($month)
@@ -1624,8 +1671,6 @@ if (Test-Path $journalFile) {
 
 $entry
 "@
-  
-  $enc = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($journalFile, ($header -replace "`r?`n", "`r`n"), $enc)
 }
 
@@ -1717,8 +1762,23 @@ if ($totalChars -gt 8000) {
   Write-Host "Always-read layer: $totalChars chars (~$estimatedTokens tokens) - Healthy" -ForegroundColor Green
 }
 
+# Auto-add memory.sqlite to .gitignore
+$giPath = Join-Path $RepoRoot ".gitignore"
+$sqliteLine = ".cursor/memory/memory.sqlite"
+if (Test-Path $giPath) {
+  $giContent = Get-Content -Raw -ErrorAction SilentlyContinue $giPath
+  if ($giContent -notmatch [regex]::Escape($sqliteLine)) {
+    Add-Content -Encoding UTF8 $giPath "`r`n# Cursor Memory System (generated)`r`n$sqliteLine"
+    Write-Host "Updated .gitignore: $sqliteLine" -ForegroundColor Green
+  }
+} else {
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($giPath, "# Cursor Memory System (generated)`r`n$sqliteLine`r`n", $enc)
+  Write-Host "Created .gitignore with: $sqliteLine" -ForegroundColor Green
+}
+
 Write-Host ""
-Write-Host "Setup complete. (Memory System v3.2)" -ForegroundColor Green
+Write-Host "Setup complete. (Memory System v3.2.1)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1) Run: powershell -ExecutionPolicy Bypass -File scripts/memory/rebuild-memory-index.ps1" -ForegroundColor White
@@ -1731,6 +1791,4 @@ Write-Host "  Add journal: scripts\memory\add-journal-entry.ps1 -Tags ""..."" -T
 Write-Host "  Query:       scripts\memory\query-memory.ps1 -Query ""..."" [-UseSqlite]" -ForegroundColor DarkGray
 Write-Host "  Lint:        scripts\memory\lint-memory.ps1" -ForegroundColor DarkGray
 Write-Host "  Clear:       scripts\memory\clear-active.ps1" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "Remember: Add .cursor/memory/memory.sqlite to .gitignore" -ForegroundColor Yellow
 Write-Host ""

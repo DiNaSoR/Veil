@@ -1,6 +1,6 @@
 ---
-description: Memory System v3.2 - Authority + Atomic Retrieval + Token Safety
-globs:
+description: Memory System v3.2.1 - Authority + Atomic Retrieval + Token Safety
+globs: ["**/*"]
 alwaysApply: true
 ---
 
