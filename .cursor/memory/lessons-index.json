@@ -1,0 +1,19 @@
+[
+    {
+        "Id":  "L-001",
+        "Num":  1,
+        "Title":  "Use single-quoted here-strings for embedded scripts",
+        "Status":  "Active",
+        "Introduced":  "2026-01-20",
+        "Tags":  [
+                     "PowerShell",
+                     "Build",
+                     "DX"
+                 ],
+        "AppliesTo":  {
+
+                      },
+        "Rule":  "Use @\u0027...\u0027@ (single-quoted) for embedded scripts to prevent variable expansion.",
+        "File":  "L-001-always-use-single-quoted-herestrings.md"
+    }
+]
